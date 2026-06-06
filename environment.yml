@@ -1,0 +1,5 @@
+# environment.yml -- the pinned conda-forge environment (the A13 lockfile).
+# Stack already installed in the 'wildfire-watershed' conda env
+# (Python 3.11, numpy<2 to satisfy pysheds 0.5's np.in1d).
+# Capture the real lockfile once P0.5 reproduces the validated result (A13):
+#   conda env export --no-builds -n wildfire-watershed > environment.yml
