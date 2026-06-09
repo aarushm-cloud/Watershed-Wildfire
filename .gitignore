@@ -2,6 +2,11 @@
 /data/
 /out/
 
+# Large reconstruction rasters (Step 1); vectors (*.geojson) stay tracked
+/validation/data/*.tif
+/validation/data/*.tiff
+/validation/data/.osm_cache/
+
 # Python
 __pycache__/
 *.py[cod]
