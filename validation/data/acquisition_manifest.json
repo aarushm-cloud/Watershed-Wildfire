@@ -1,0 +1,185 @@
+{
+  "purpose": "P0.5 Step 1 acquisition provenance (Thomas Fire / Montecito reconstruction inputs). Behavior-anchor inputs for gate.py rebuild.",
+  "fetch_date": "2026-06-08",
+  "aoi_status": "BEST-EFFORT RECONSTRUCTION (owner-approved). Exact original bbox unrecoverable (lived only in deleted gate.py). Placement is a named confound.",
+  "canonical_grid": {
+    "crs": "EPSG:32611",
+    "size_px": [
+      1413,
+      1295
+    ],
+    "cell_m": 10.0,
+    "bounds_xmin_ymin_xmax_ymax": [
+      253179.217,
+      3809589.306,
+      267309.217,
+      3822539.306
+    ],
+    "placement_center_lonlat": [
+      -119.61,
+      34.4583
+    ],
+    "defined_by": "dem.tif (fetched first; all other layers aligned to it)"
+  },
+  "inputs": {
+    "dem.tif": {
+      "source": "USGS 3DEP 10 m, elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage",
+      "request_params": {
+        "bboxSR": 32611,
+        "imageSR": 32611,
+        "size": "1413,1295",
+        "format": "tiff",
+        "pixelType": "F32",
+        "interpolation": "RSP_BilinearInterpolation"
+      },
+      "check_class": "consistency",
+      "known_answer": {
+        "dims_target": "1413x1295@10m",
+        "dims_observed": "1413x1295@10.0m EXACT",
+        "elev_target_m": [
+          -1.7,
+          1178.6
+        ],
+        "elev_observed_m": [
+          0.0,
+          1199.13
+        ],
+        "elev_mean_m": 426.282
+      },
+      "value_fingerprint": {
+        "mean_m": 426.282,
+        "max_at_rowcol": [
+          534,
+          1334
+        ],
+        "zero_cells": 140503,
+        "samples_rowcol": {
+          "0,0": 522.06,
+          "0,1412": 922.12,
+          "1294,0": 0.0,
+          "1294,1412": 1.93,
+          "647,706": 446.53
+        }
+      },
+      "vintage": "NOT EXPOSED via dynamic 3DEP identify (date fields null). Behavioral evidence of vintage drift: ocean clamped to 0.0 (140,503 zero-cells) vs report min -1.7.",
+      "findings": [
+        "elev max +20.5 m vs report (placement: highest peak mid-window at row534/col1334)",
+        "elev min 0.0 vs -1.7 (3DEP vintage clamps ocean to 0.0; not placement-fixable)"
+      ]
+    },
+    "sbs.tif": {
+      "source": "USFS BAER SBS national mosaic, imagery.geoplatform.gov/iipp/rest/services/Fire_Aviation/USFS_EDW_BAER_SoilBurnSeverityClassification/ImageServer/exportImage",
+      "mosaic_rule_used": {
+        "mosaicMethod": "esriMosaicLockRaster",
+        "where": "name='thomas_soil_burn_severity'"
+      },
+      "objectid_confirmed": 3248,
+      "request_params": {
+        "bboxSR": 32611,
+        "imageSR": 32611,
+        "size": "1413,1295",
+        "format": "tiff",
+        "pixelType": "U4",
+        "interpolation": "RSP_NearestNeighbor"
+      },
+      "pixel_class_encoding": {
+        "0": "Masked (Developed)",
+        "1": "Unburned to very low",
+        "2": "Low",
+        "3": "Moderate",
+        "4": "High",
+        "15": "NoData/outside Thomas footprint"
+      },
+      "burn_weight_map_applies": {
+        "1": 0.0,
+        "2": 0.33,
+        "3": 0.67,
+        "4": 1.0,
+        "0": 0.0,
+        "15": 0.0
+      },
+      "check_class": "consistency",
+      "known_answer": {
+        "burned_pct_target": 25.2,
+        "burned_pct_observed": 28.87,
+        "moderate_pct_target": 17.5,
+        "moderate_pct_observed": 22.26,
+        "classes_present": 4,
+        "integer_values_only": true
+      },
+      "findings": [
+        "burned% 28.87 vs 25.2 and moderate 22.26 vs 17.5 -> AOI placement (less ocean in denominator) and/or SBS reprocessing since 2026-06-01; composition shift exceeds pure ocean-dilution"
+      ]
+    },
+    "assets.geojson": {
+      "source": "OpenStreetMap buildings via Overpass (osmnx 2.1.0, cached)",
+      "query": "features_from_polygon(AOI), tags={building:True}, centroids within AOI, CRS EPSG:32611",
+      "check_class": "independent",
+      "known_answer": {
+        "count_target": 12066,
+        "count_observed": 12221,
+        "delta_pct": 1.3,
+        "band_pct": 15,
+        "result": "WITHIN band -> PASS"
+      }
+    },
+    "creeks.geojson": {
+      "source": "OSM named waterways via Overpass (osmnx, cached) + report 2/6 fork handling + debris-basin volumes",
+      "channels": [
+        "Cold Spring Creek",
+        "Hot Springs Creek",
+        "Montecito Creek",
+        "Oak Creek",
+        "San Ysidro Creek",
+        "Buena Vista Creek",
+        "Romero Creek"
+      ],
+      "watersheds_represented": [
+        "Montecito",
+        "Oak",
+        "San Ysidro",
+        "Buena Vista",
+        "Romero"
+      ],
+      "debris_basin_volume_m3": {
+        "Romero Creek": 33000,
+        "Cold Spring Creek": 19000,
+        "San Ysidro Creek": 17000,
+        "Montecito Creek": 1800
+      },
+      "check_class": "consistency + partly circular",
+      "frozen": true,
+      "deferred_to_step2": "basin-match -> '6 matchable flowed basins' known-answer (NOT run in Step 1)"
+    }
+  },
+  "alignment": {
+    "dem_shape": [
+      1295,
+      1413
+    ],
+    "sbs_shape": [
+      1295,
+      1413
+    ],
+    "shape_match": true,
+    "transform_match": true,
+    "crs_match": true,
+    "res": [
+      10.0,
+      10.0
+    ],
+    "dem_crs": "EPSG:32611",
+    "bounds_32611": [
+      253179.217,
+      3809589.306,
+      267309.217,
+      3822539.306
+    ],
+    "assets_crs": "EPSG:32611",
+    "assets_n": 12221,
+    "assets_all_within_AOI": true,
+    "creeks_crs": "EPSG:32611",
+    "creeks_n": 7,
+    "creeks_all_intersect_AOI": true
+  }
+}

@@ -264,12 +264,13 @@ def mean_slope_tan(dem_raw: np.ndarray) -> np.ndarray:
 def _burn_weight_raster(sbs: np.ndarray):
     """Per-cell burn weight (A17, canonical): classes 1-4 -> BURN_WEIGHTS; Developed(0) and
     outside-perimeter/NoData(15) -> 0.0, all INCLUDED in the denominator (coverage-weighted).
-    Returns (wt, covered); covered = cells inside the SBS perimeter (class != 15), used only
-    for the burn_coverage_frac caveat (C8), NOT to gate the mean."""
+    Returns (wt, covered); covered = cells with a real burn assessment, class in {1,2,3,4}
+    (excludes Developed=0 and NoData=15) -- the A18/C8 fix; used only for the burn_coverage_frac
+    caveat, NOT to gate the mean."""
     wt = np.zeros(sbs.shape, dtype=np.float64)
     for cls, w in BURN_WEIGHTS.items():      # classes 1..4 (0 and 15 stay 0.0)
         wt[sbs == cls] = w
-    covered = sbs != 15
+    covered = np.isin(sbs, (1, 2, 3, 4))
     return wt, covered
 
 
