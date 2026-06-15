@@ -7,6 +7,9 @@
 /validation/data/*.tiff
 /validation/data/.osm_cache/
 
+# Gate-regenerated outputs -- the behavior lock is the oracle, not these files (OUT-CLEANUP)
+/validation/out/
+
 # Python
 __pycache__/
 *.py[cod]
