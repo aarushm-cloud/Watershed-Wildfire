@@ -36,35 +36,43 @@ from scipy.spatial import cKDTree
 from shapely.geometry import shape as shapely_shape, Point
 from shapely.ops import unary_union
 
-# --- frozen params (do NOT tune to hit a known-answer -- A-guardrail, FM-3) ---
-CONTOUR_M            = 150     # mountain-front contour elevation (m)
-ACC_THRESHOLD_CELLS  = 500     # min flow-accumulation (cells) for a channel cell
-MIN_BASIN_KM2        = 0.1     # discard catchments below this (km^2)
-DRAINS_TO_ASSET_M    = 600     # keep basins whose channel reaches within this of assets (m)
-TRUTH_MATCH_M        = 250     # max creek -> outlet match distance (m)  [used in 2f]
+# --- P1.1 bootstrap: make the project root importable so `from src...` resolves in EVERY
+# context. This file is loaded by the standalone run (`python validation/gate.py`), by the
+# pytest behavior-lock, and by the lock's standalone runner -- all three import THIS module,
+# so keying the path off __file__ here is the single shared mechanism. gate.py lives at
+# <root>/validation/gate.py, hence root = parents[1].
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-# --- SBS pixel -> class encoding (Step 1; do NOT re-derive) ---
-# 1 = Unburned/very-low, 2 = Low, 3 = Moderate, 4 = High, 0 = Masked (Developed), 15 = NoData
-BURN_WEIGHTS = {1: 0.0, 2: 0.33, 3: 0.67, 4: 1.0}   # 0/15 weight -> 0.0
-# mean_burn denominator (A17, owner-confirmed canonical): Developed(0) AND outside-perimeter/
-# NoData(15) map to 0.0 and are INCLUDED in the denominator (coverage-weighted). Faithful to
-# VALIDATION_REPORT s2 "(unburned/outside-perimeter -> 0)"; reproduces flowed_mean=1.619, AUC ~0.972.
-BURN_LOW_COVERAGE = 0.80      # flag basins with < this fraction of SBS-covered cells (C8 caveat)
+# --- P1.1: frozen scalar tunables + grid/burn encodings now live in src/config.py and are
+# imported back BY NAME (rebinds them as gate globals, so existing `gate.X` / bare-name
+# references still resolve). EXTRACTED verbatim, not redefined: exactly one binding each. ---
+from src.config import (
+    CONTOUR_M,
+    ACC_THRESHOLD_CELLS,
+    MIN_BASIN_KM2,
+    DRAINS_TO_ASSET_M,
+    TRUTH_MATCH_M,
+    BURN_WEIGHTS,
+    BURN_LOW_COVERAGE,
+    CANONICAL_CRS,
+    CELL_M,
+    MASTER_KNOWN_KM2,
+    MASTER_PASS_LO,
+    MASTER_PASS_HI,
+    MASTER_ORDER_LO,
+    MASTER_ORDER_HI,
+    DIRMAP,
+    D8_OFFSETS,
+)
+# Shared fail-loud exception + coordinate/CRS helpers (extracted verbatim to src/grids.py).
+from src.grids import GateAbort, _assert_metric_crs, _rc_to_xy
 
-# --- canonical grid (the validation case CRS; metres) ---
-CANONICAL_CRS  = "EPSG:32611"
-CELL_M         = 10.0                      # DEM resolution (m); dx = dy = 10 m
+# CELL_AREA_KM2 is a DERIVATION of CELL_M (m^2 per cell -> km^2), not a standalone tunable;
+# per the P1.1 named-binding rule it stays computed here at its use-site from the imported
+# CELL_M (= 1e-4 km^2/cell), not extracted into config.py.
 CELL_AREA_KM2  = (CELL_M * CELL_M) / 1.0e6 # m^2 per cell -> km^2 (= 1e-4 km^2/cell)
-
-# --- master-outlet zones (the FM-1 anti-0km2 guard), area in km^2 ---
-MASTER_KNOWN_KM2 = 39.19
-MASTER_PASS_LO, MASTER_PASS_HI   = 33.3, 45.1   # +/-15% of 39.19 -> PASS
-MASTER_ORDER_LO, MASTER_ORDER_HI = 20.0, 80.0   # outside this -> ABORT (order-of-magnitude)
-
-# pysheds default D8 dirmap, listed in the order [N, NE, E, SE, S, SW, W, NW].
-DIRMAP = (64, 128, 1, 2, 4, 8, 16, 32)
-D8_OFFSETS = {64: (-1, 0), 128: (-1, 1), 1: (0, 1), 2: (1, 1),
-              4: (1, 0), 8: (1, -1), 16: (0, -1), 32: (-1, -1)}
 
 SCREENING_STATEMENT = ("Within-fire relative screening ranking of watersheds warranting closer "
                        "assessment -- not a prediction of where debris will go. Not cross-fire comparable.")
@@ -75,27 +83,6 @@ DATA = ROOT / "data"
 OUT  = ROOT / "out"
 DEM_TIF, SBS_TIF = DATA / "dem.tif", DATA / "sbs.tif"
 ASSETS_GJ, CREEKS_GJ = DATA / "assets.geojson", DATA / "creeks.geojson"
-
-
-class GateAbort(RuntimeError):
-    """Raised when a stage precondition is violated -- fail loud, never degrade (FM-10)."""
-
-
-# ---------------------------------------------------------------------------
-# shared helpers
-# ---------------------------------------------------------------------------
-def _assert_metric_crs(layer_crs, name: str) -> None:
-    """Fail loud unless `layer_crs` is the canonical metric CRS (EPSG:32611)."""
-    if layer_crs is None or str(layer_crs).upper() != CANONICAL_CRS:
-        raise GateAbort(f"{name} CRS is {layer_crs}, expected {CANONICAL_CRS} (metric). "
-                        "Refusing to compute distances in a non-metric CRS.")
-
-
-def _rc_to_xy(rows: np.ndarray, cols: np.ndarray, transform) -> np.ndarray:
-    """Cell (row, col) -> projected (x, y) cell-centre coords (metres, EPSG:32611)."""
-    a, _, c, _, e, f = (transform.a, transform.b, transform.c,
-                        transform.d, transform.e, transform.f)
-    return np.column_stack([c + a * (cols + 0.5), f + e * (rows + 0.5)])
 
 
 # ---------------------------------------------------------------------------
