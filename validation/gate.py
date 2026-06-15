@@ -31,7 +31,6 @@ import geopandas as gpd
 import pandas as pd
 import rasterio
 from rasterio import features as rfeatures
-from pysheds.grid import Grid
 from scipy.spatial import cKDTree
 from shapely.geometry import shape as shapely_shape, Point
 from shapely.ops import unary_union
@@ -68,6 +67,10 @@ from src.config import (
 )
 # Shared fail-loud exception + coordinate/CRS helpers (extracted verbatim to src/grids.py).
 from src.grids import GateAbort, _assert_metric_crs, _rc_to_xy
+# P1.2: raw input loaders (DEM/burn/assets/creeks) extracted verbatim to src/ingest.py. Paths
+# stay here and are passed in; alignment validation, the burn remap/coverage, and the
+# _assert_metric_crs guards remain below (conservative lift -- raw reads only).
+from src.ingest import load_dem, load_burn, load_assets, load_creeks, BURN_SOURCE
 
 # CELL_AREA_KM2 is a DERIVATION of CELL_M (m^2 per cell -> km^2), not a standalone tunable;
 # per the P1.1 named-binding rule it stays computed here at its use-site from the imported
@@ -76,7 +79,8 @@ CELL_AREA_KM2  = (CELL_M * CELL_M) / 1.0e6 # m^2 per cell -> km^2 (= 1e-4 km^2/c
 
 SCREENING_STATEMENT = ("Within-fire relative screening ranking of watersheds warranting closer "
                        "assessment -- not a prediction of where debris will go. Not cross-fire comparable.")
-BURN_SOURCE = "SBS"  # validation input (BAER Soil Burn Severity); A4/A11 provenance
+# BURN_SOURCE (A4/A11 provenance) now lives in src/ingest.py and is imported above -- single
+# source of truth; write_outputs reads the imported value (SCREENING_STATEMENT stays here).
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -102,9 +106,7 @@ def stage_2a_hydrology():
         if abs(transform.a - CELL_M) > 1e-6 or abs(transform.e + CELL_M) > 1e-6:
             raise GateAbort(f"DEM resolution {(transform.a, transform.e)} != {CELL_M} m.")
 
-    grid = Grid.from_raster(str(DEM_TIF))
-    dem = grid.read_raster(str(DEM_TIF))
-    dem_raw = np.asarray(dem, dtype=np.float64).copy()  # raw terrain elevation (m)
+    grid, dem, dem_raw = load_dem(DEM_TIF)   # pysheds Grid + Raster + raw float64 elev (m); src/ingest.py
 
     pit_filled = grid.fill_pits(dem)
     flooded    = grid.fill_depressions(pit_filled)
@@ -266,8 +268,7 @@ def stage_2e_score(hydro, basins):
 
     score = mean_burn [0-1, dimensionless] x mean_slope [tan, dimensionless] x area_km2 [km^2].
     """
-    with rasterio.open(SBS_TIF) as s:
-        sbs = s.read(1)
+    sbs = load_burn(SBS_TIF)                 # raw SBS class raster (band 1); src/ingest.py
     wt, covered = _burn_weight_raster(sbs)   # A17: coverage-weighted (class 15 -> 0.0, included)
     slope = mean_slope_tan(hydro["dem_raw"])
 
@@ -438,14 +439,14 @@ def run_pipeline():
         raise GateAbort(f"Master outlet {hydro['master_km2']:.2f} km^2 in ABORT zone (FM-1).")
 
     outlets = stage_2b_outlets(hydro)
-    assets = gpd.read_file(ASSETS_GJ)
+    assets = load_assets(ASSETS_GJ)          # GeoDataFrame; src/ingest.py
     _assert_metric_crs(assets.crs, "assets.geojson")
     asset_xy = np.column_stack([assets.geometry.x.values, assets.geometry.y.values])
     basins = stage_2c_delineate(hydro, outlets, asset_xy)
 
     ranked, n_ties = stage_2e_score(hydro, basins)
 
-    creeks = gpd.read_file(CREEKS_GJ)
+    creeks = load_creeks(CREEKS_GJ)          # GeoDataFrame; src/ingest.py
     _assert_metric_crs(creeks.crs, "creeks.geojson")
     if not creeks.geometry.is_valid.all():
         raise GateAbort("Invalid creek geometry -- FM-10 (geometry abort, not a match miss).")
