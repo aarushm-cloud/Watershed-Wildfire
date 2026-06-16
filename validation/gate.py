@@ -71,6 +71,9 @@ from src.grids import GateAbort, _assert_metric_crs, _rc_to_xy
 # stay here and are passed in; alignment validation, the burn remap/coverage, and the
 # _assert_metric_crs guards remain below (conservative lift -- raw reads only).
 from src.ingest import load_dem, load_burn, load_assets, load_creeks, BURN_SOURCE
+# P1.3: the five-step pysheds flow chain extracted verbatim to src/hydrology.py. gate threads the
+# grid+dem in and the (fdir, acc) products out; master-outlet detection + catchment stay here (P1.4).
+from src.hydrology import run_hydrology
 
 # CELL_AREA_KM2 is a DERIVATION of CELL_M (m^2 per cell -> km^2), not a standalone tunable;
 # per the P1.1 named-binding rule it stays computed here at its use-site from the imported
@@ -108,11 +111,7 @@ def stage_2a_hydrology():
 
     grid, dem, dem_raw = load_dem(DEM_TIF)   # pysheds Grid + Raster + raw float64 elev (m); src/ingest.py
 
-    pit_filled = grid.fill_pits(dem)
-    flooded    = grid.fill_depressions(pit_filled)
-    inflated   = grid.resolve_flats(flooded)            # conditioned DEM for routing
-    fdir = grid.flowdir(inflated, dirmap=DIRMAP, routing="d8")
-    acc  = grid.accumulation(fdir, dirmap=DIRMAP, routing="d8")
+    fdir, acc = run_hydrology(grid, dem)   # 5-step pysheds chain (fdir/acc Rasters); src/hydrology.py
 
     acc_arr = np.asarray(acc)
     shape = acc_arr.shape
