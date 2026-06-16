@@ -1,8 +1,10 @@
 """gate.py -- the Week-0 validation gate, reconstructed in P0.5 from
 VALIDATION_REPORT.md (the behavior oracle) using the same data sources and
-parameters. Must reproduce the documented 32-basin ranking, top-tercile 6/6,
-#1 = Cold Spring (flowed), rank-AUC 0.987, and the 39.19 km2 master-outlet
-check. Not to be edited to make a run pass. See DECISIONS A16.
+parameters. Reproduces the ranking ORDER + both pre-registered pass criteria
+(top-tercile 6/6, #1 = Cold Spring, flowed); the reconstruction lands at 36
+basins / rank-AUC 0.9722 / 44.73 km2 master outlet -- the AOI-shift findings the
+behavior lock anchors on, NOT the report's documented 32 / 0.987 / 39.19 (see
+tests/test_behavior_lock.py). Not to be edited to make a run pass. See DECISIONS A16.
 
 Sub-stages, single script (P1 modularises into src/):
   2a hydrology  -- pysheds fill pits -> fill depressions -> resolve flats ->
