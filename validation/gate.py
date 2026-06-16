@@ -48,7 +48,6 @@ if str(_REPO_ROOT) not in sys.path:
 # references still resolve). EXTRACTED verbatim, not redefined: exactly one binding each. ---
 from src.config import (
     TRUTH_MATCH_M,
-    BURN_WEIGHTS,
     BURN_LOW_COVERAGE,
     CANONICAL_CRS,
     CELL_M,
@@ -72,6 +71,10 @@ from src.hydrology import run_hydrology
 # src/delineate.py (the FM-1 index-mode catchment lives there). gate unpacks hydro at the call
 # site and passes explicit args; scoring, evaluate, and the master-outlet block stay here.
 from src.delineate import stage_2b_outlets, stage_2c_delineate
+# P1.5: frozen scoring + ranking + A18 coverage (with its fused _burn_weight_raster helper)
+# extracted verbatim to src/score.py. gate computes the raw SBS raster (load_burn) and the per-cell
+# slope raster (mean_slope_tan) at the call site and passes them in; the frozen formula lives there.
+from src.score import stage_2e_score
 
 # CELL_AREA_KM2 is a DERIVATION of CELL_M (m^2 per cell -> km^2), not a standalone tunable;
 # per the P1.1 named-binding rule it stays computed here at its use-site from the imported
@@ -148,7 +151,9 @@ def classify_master_zone(area_km2: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 2d -- slope (OWNER-CONFIRMED: tan theta) + 2e -- score + rank
+# 2d -- slope (OWNER-CONFIRMED: tan theta). 2e score+rank + _burn_weight_raster -> src/score.py
+# (P1.5); gate computes the slope raster here and the raw SBS raster (load_burn) at the call site
+# and passes both into stage_2e_score. mean_slope_tan stays here (terrain derivative, passed in).
 # ---------------------------------------------------------------------------
 def mean_slope_tan(dem_raw: np.ndarray) -> np.ndarray:
     """Per-cell slope as tan(theta) = rise/run gradient magnitude, DIMENSIONLESS.
@@ -161,48 +166,6 @@ def mean_slope_tan(dem_raw: np.ndarray) -> np.ndarray:
     """
     gy, gx = np.gradient(dem_raw, CELL_M, CELL_M)   # d/d(row), d/d(col) in z per metre
     return np.hypot(gx, gy)                          # tan(theta), rise/run
-
-
-def _burn_weight_raster(sbs: np.ndarray):
-    """Per-cell burn weight (A17, canonical): classes 1-4 -> BURN_WEIGHTS; Developed(0) and
-    outside-perimeter/NoData(15) -> 0.0, all INCLUDED in the denominator (coverage-weighted).
-    Returns (wt, covered); covered = cells with a real burn assessment, class in {1,2,3,4}
-    (excludes Developed=0 and NoData=15) -- the A18/C8 fix; used only for the burn_coverage_frac
-    caveat, NOT to gate the mean."""
-    wt = np.zeros(sbs.shape, dtype=np.float64)
-    for cls, w in BURN_WEIGHTS.items():      # classes 1..4 (0 and 15 stay 0.0)
-        wt[sbs == cls] = w
-    covered = np.isin(sbs, (1, 2, 3, 4))
-    return wt, covered
-
-
-def stage_2e_score(hydro, basins):
-    """mean_burn x mean_slope x area_km2 (science_reference s1), within-fire ordinal rank.
-
-    score = mean_burn [0-1, dimensionless] x mean_slope [tan, dimensionless] x area_km2 [km^2].
-    """
-    sbs = load_burn(SBS_TIF)                 # raw SBS class raster (band 1); src/ingest.py
-    wt, covered = _burn_weight_raster(sbs)   # A17: coverage-weighted (class 15 -> 0.0, included)
-    slope = mean_slope_tan(hydro["dem_raw"])
-
-    for b in basins:
-        m = b["mask"]
-        ncells = int(m.sum())
-        ncov = int((m & covered).sum())
-        b["burn_coverage_frac"] = ncov / ncells if ncells else 0.0
-        # A17: mean over ALL basin cells; outside-perimeter/NoData(15) included as 0.0
-        b["mean_burn"] = float(np.mean(wt[m])) if ncells else 0.0
-        b["mean_slope"] = float(np.mean(slope[m]))                       # tan(theta), dimensionless
-        b["score"] = b["mean_burn"] * b["mean_slope"] * b["area_km2"]    # burn[0-1] x slope[tan] x km^2
-        b["low_coverage"] = b["burn_coverage_frac"] < BURN_LOW_COVERAGE
-
-    # ordinal rank: score desc, ties -> ascending basin_id (deterministic)
-    order = sorted(basins, key=lambda b: (-b["score"], b["basin_id"]))
-    for rank, b in enumerate(order, start=1):
-        b["rank"] = rank
-    scores = [b["score"] for b in basins]
-    n_ties = len(scores) - len(set(round(s, 12) for s in scores))
-    return order, n_ties
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +322,9 @@ def run_pipeline():
     basins = stage_2c_delineate(hydro["grid"], hydro["acc"], hydro["fdir_raster"],
                                 hydro["transform"], hydro["shape"], outlets, asset_xy)
 
-    ranked, n_ties = stage_2e_score(hydro, basins)
+    sbs = load_burn(SBS_TIF)                       # raw SBS class raster (band 1); src/ingest.py
+    slope = mean_slope_tan(hydro["dem_raw"])       # per-cell tan(theta) slope raster (2d, stays in gate)
+    ranked, n_ties = stage_2e_score(sbs, slope, basins)   # frozen burn x slope x area; src/score.py
 
     creeks = load_creeks(CREEKS_GJ)          # GeoDataFrame; src/ingest.py
     _assert_metric_crs(creeks.crs, "creeks.geojson")
