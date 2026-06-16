@@ -1,5 +1,45 @@
-# environment.yml -- the pinned conda-forge environment (the A13 lockfile).
-# Stack already installed in the 'wildfire-watershed' conda env
-# (Python 3.11, numpy<2 to satisfy pysheds 0.5's np.in1d).
-# Capture the real lockfile once P0.5 reproduces the validated result (A13):
-#   conda env export --no-builds -n wildfire-watershed > environment.yml
+# environment.yml -- PORTABLE pinned conda environment for the Post-Fire Debris-Flow
+# Watershed Screening Tool. Resolves A10 (lockfile capture) + C3 (version numbers), repo side.
+#
+# Two-artifact model (a deliberate split of A13's single-file model -- flag for an A13/C3 vault
+# update; do NOT edit the vault from here):
+#   * environment.yml      (this file)  -- PORTABLE: conda-forge channel, exact version pins
+#                                           (==X.Y.Z), NO build strings, so it solves cross-
+#                                           platform (the P3/P6 "a practitioner installs it" path).
+#   * environment.lock.yml               -- EXACT: full `conda env export` WITH build strings,
+#                                           platform noted at top, for bit-exact reproduction.
+#
+# Captures the live `wildfire-watershed` env under which the validated gate is green: cold
+# `pytest` -> 7/7 and `python validation/gate.py` -> canonical Montecito result
+# (6/6 flowed in top tercile, #1 Cold Spring, master 44.73 km^2, rank-AUC 0.9722,
+# low_coverage 26, determinism identical). Verified by fresh-env recreation on osx-arm64.
+#
+# Load-bearing notes:
+#   * numpy<2 is required -- pysheds 0.5 calls the removed np.in1d (CLAUDE.md / FAILURE_MODES FM-2).
+#   * I/O engine is pyogrio. The validated run resolves geopandas.read_file -> pyogrio
+#     (options.io_engine=None; fiona is NOT installed). fiona is intentionally OMITTED -- swapping
+#     the I/O engine can shift geometry parsing, so this pins the ACTIVE engine, it does not swap it.
+#   * GDAL is present as libgdal-core and is load-bearing under rasterio + pyogrio -> pinned.
+name: wildfire-watershed
+channels:
+  - conda-forge
+dependencies:
+  # --- language ---
+  - python==3.11.15
+  # --- numerics (numpy pinned <2 for pysheds 0.5's removed np.in1d) ---
+  - numpy==1.26.4
+  - scipy==1.17.1          # gate.py: scipy.spatial.cKDTree (creek <-> outlet matching)
+  - pandas==3.0.3
+  # --- hydrology ---
+  - pysheds==0.5           # D8 flow direction / accumulation; index-mode catchment()
+  # --- geospatial I/O + geometry ---
+  - rasterio==1.4.4        # DEM / SBS raster I/O
+  - geopandas==1.1.3
+  - shapely==2.1.2
+  - pyogrio==0.12.1        # ACTIVE geopandas I/O engine (fiona omitted on purpose)
+  - pyproj==3.7.2          # CRS / EPSG:32611 transforms (load-bearing for distances)
+  - libgdal-core==3.12.3   # GDAL: load-bearing under rasterio + pyogrio
+  # --- outputs / viz ---
+  - folium==0.20.0         # static map (outputs stage)
+  # --- test ---
+  - pytest==9.0.3
