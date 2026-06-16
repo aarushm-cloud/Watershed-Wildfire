@@ -56,11 +56,14 @@ from src.config import (
     DIRMAP,
 )
 # Shared fail-loud exception + coordinate/CRS helpers (extracted verbatim to src/grids.py).
-from src.grids import GateAbort, _assert_metric_crs, _rc_to_xy
-# P1.2: raw input loaders (DEM/burn/assets/creeks) extracted verbatim to src/ingest.py. Paths
-# stay here and are passed in; alignment validation, the burn remap/coverage, and the
-# _assert_metric_crs guards remain below (conservative lift -- raw reads only).
-from src.ingest import load_dem, load_burn, load_assets, load_creeks, BURN_SOURCE
+# P2.2a: assert_aligned is the DEM/SBS alignment check, extracted verbatim from stage_2a below.
+from src.grids import GateAbort, _assert_metric_crs, _rc_to_xy, assert_aligned
+# P1.2 loaders + P2.2a A15 seam (src/ingest.py). Paths stay here and are passed in. ingest_burn is
+# the seam: it SELECTS the burn source (A3 precedence), remaps to per-cell weights + the A18 coverage
+# mask, and emits the single burn-source provenance (A4) -- so gate no longer reads SBS or remaps it
+# directly. The DEM/SBS alignment check (assert_aligned) + the _assert_metric_crs asset/creek guards
+# stay below at their call sites.
+from src.ingest import load_dem, load_assets, load_creeks, ingest_burn
 # P1.3: the five-step pysheds flow chain extracted verbatim to src/hydrology.py. gate threads the
 # grid+dem in and the (fdir, acc) products out; master-outlet detection + catchment stay here (P1.4).
 from src.hydrology import run_hydrology
@@ -68,13 +71,13 @@ from src.hydrology import run_hydrology
 # src/delineate.py (the FM-1 index-mode catchment lives there). gate unpacks hydro at the call
 # site and passes explicit args; scoring, evaluate, and the master-outlet block stay here.
 from src.delineate import stage_2b_outlets, stage_2c_delineate
-# P1.5: frozen scoring + ranking + A18 coverage (with its fused _burn_weight_raster helper)
-# extracted verbatim to src/score.py. gate computes the raw SBS raster (load_burn) and the per-cell
-# slope raster (mean_slope_tan) at the call site and passes them in; the frozen formula lives there.
+# P1.5/P2.2a: frozen scoring + ranking in src/score.py. The A17 weight raster + A18 coverage mask are
+# now produced by the ingest seam (ingest_burn) and passed in alongside the per-cell slope raster
+# (mean_slope_tan, computed at the call site); the frozen formula + per-basin reduction live there.
 from src.score import stage_2e_score
 # P1.6: write_outputs (+ the SCREENING_STATEMENT A11 framing it emits) extracted verbatim to
-# src/outputs.py (the DAG sink). gate passes out_dir / dem_tif / burn_source explicitly; outputs
-# never re-derives the burn source (A4/A15). DEM-transform re-open preserved (see report).
+# src/outputs.py (the DAG sink). gate passes out_dir / dem_tif / burn_source explicitly (burn_source
+# from the ingest seam's provenance, A4/A15); outputs never re-derives it. DEM-transform re-open kept.
 from src.outputs import write_outputs
 
 # CELL_AREA_KM2 is a DERIVATION of CELL_M (m^2 per cell -> km^2), not a standalone tunable;
@@ -83,8 +86,9 @@ from src.outputs import write_outputs
 CELL_AREA_KM2  = (CELL_M * CELL_M) / 1.0e6 # m^2 per cell -> km^2 (= 1e-4 km^2/cell)
 
 # SCREENING_STATEMENT (A11 framing) now lives in src/outputs.py, the module that emits it (P1.6).
-# BURN_SOURCE (A4/A11 provenance) lives in src/ingest.py and is imported above -- single source of
-# truth; gate threads it to write_outputs as an arg (outputs never re-derives the burn source).
+# Burn-source provenance (A4/A11) is decided ONCE by the ingest seam (ingest_burn -> provenance dict);
+# run_pipeline carries it as R["provenance"] and main() threads provenance["burn_source"] to
+# write_outputs (outputs never re-derives the burn source -- single source of truth, FM-5).
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -99,13 +103,10 @@ ASSETS_GJ, CREEKS_GJ = DATA / "assets.geojson", DATA / "creeks.geojson"
 def stage_2a_hydrology():
     """Condition the DEM and derive D8 flow direction + accumulation (pysheds)."""
     with rasterio.open(DEM_TIF) as dsrc, rasterio.open(SBS_TIF) as ssrc:
-        if str(dsrc.crs).upper() != CANONICAL_CRS:
-            raise GateAbort(f"DEM CRS {dsrc.crs} != {CANONICAL_CRS}.")
-        if (dsrc.height, dsrc.width) != (ssrc.height, ssrc.width):
-            raise GateAbort(f"DEM shape {(dsrc.height,dsrc.width)} != SBS shape "
-                            f"{(ssrc.height,ssrc.width)} (alignment broken).")
-        if not dsrc.transform.almost_equals(ssrc.transform):
-            raise GateAbort("DEM/SBS affine transforms differ (alignment broken).")
+        # DEM/SBS alignment (CRS == canonical, equal shape, equal affine) -- src/grids.assert_aligned
+        # (extracted verbatim, P2.2a). The DEM-RESOLUTION check is a single-layer property, not a
+        # pairwise alignment check, so it stays here.
+        assert_aligned(dsrc.profile, ssrc.profile)
         transform = dsrc.transform
         if abs(transform.a - CELL_M) > 1e-6 or abs(transform.e + CELL_M) > 1e-6:
             raise GateAbort(f"DEM resolution {(transform.a, transform.e)} != {CELL_M} m.")
@@ -151,9 +152,9 @@ def classify_master_zone(area_km2: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 2d -- slope (OWNER-CONFIRMED: tan theta). 2e score+rank + _burn_weight_raster -> src/score.py
-# (P1.5); gate computes the slope raster here and the raw SBS raster (load_burn) at the call site
-# and passes both into stage_2e_score. mean_slope_tan stays here (terrain derivative, passed in).
+# 2d -- slope (OWNER-CONFIRMED: tan theta). 2e score+rank -> src/score.py (P1.5/P2.2a); the A17 weight
+# raster + A18 coverage come from the ingest seam (ingest_burn), gate computes the slope raster here,
+# and all three feed stage_2e_score. mean_slope_tan stays here (terrain derivative, passed in).
 # ---------------------------------------------------------------------------
 def mean_slope_tan(dem_raw: np.ndarray) -> np.ndarray:
     """Per-cell slope as tan(theta) = rise/run gradient magnitude, DIMENSIONLESS.
@@ -249,7 +250,7 @@ def evaluate(basins, ranked, creek_nearest, match_m):
 # outputs
 # ---------------------------------------------------------------------------
 # write_outputs (ranking.csv + basins.geojson + provenance/screening stamping) -> src/outputs.py
-# (P1.6). gate calls it from main() with explicit args (OUT, DEM_TIF, BURN_SOURCE); see run summary.
+# (P1.6). gate calls it from main() with explicit args (OUT, DEM_TIF, provenance["burn_source"]).
 
 
 # ---------------------------------------------------------------------------
@@ -270,9 +271,10 @@ def run_pipeline():
     basins = stage_2c_delineate(hydro["grid"], hydro["acc"], hydro["fdir_raster"],
                                 hydro["transform"], hydro["shape"], outlets, asset_xy)
 
-    sbs = load_burn(SBS_TIF)                       # raw SBS class raster (band 1); src/ingest.py
+    # A15 seam: select source + remap to weights + A18 coverage + single provenance; src/ingest.py
+    wt, covered, provenance = ingest_burn(SBS_TIF)
     slope = mean_slope_tan(hydro["dem_raw"])       # per-cell tan(theta) slope raster (2d, stays in gate)
-    ranked, n_ties = stage_2e_score(sbs, slope, basins)   # frozen burn x slope x area; src/score.py
+    ranked, n_ties = stage_2e_score(wt, covered, slope, basins)   # frozen burn x slope x area; src/score.py
 
     creeks = load_creeks(CREEKS_GJ)          # GeoDataFrame; src/ingest.py
     _assert_metric_crs(creeks.crs, "creeks.geojson")
@@ -283,7 +285,8 @@ def run_pipeline():
 
     return {"hydro": hydro, "zone": zone, "outlets": outlets, "basins": basins,
             "ranked": ranked, "n_ties": n_ties, "creeks": creeks,
-            "creek_nearest": creek_nearest, "metrics": metrics}
+            "creek_nearest": creek_nearest, "metrics": metrics,
+            "provenance": provenance}   # A4/A15: single burn-source stamp from the ingest seam
 
 
 def perturbation_probe(basins, ranked, creek_nearest):
@@ -372,7 +375,8 @@ def main() -> None:
         print(f"     {mm:7d} {cnt:6d} {intop:>7} {str(sixsix):>8} {str(r1):>9}")
 
     # --- outputs ---
-    csv_path, gj_path, _ = write_outputs(basins, R["creek_nearest"], OUT, DEM_TIF, BURN_SOURCE)
+    csv_path, gj_path, _ = write_outputs(basins, R["creek_nearest"], OUT, DEM_TIF,
+                                         R["provenance"]["burn_source"])   # A4/A15: from the seam
     print(f"\n[out] wrote {csv_path.relative_to(ROOT.parent)} and {gj_path.relative_to(ROOT.parent)}")
 
     # --- determinism: actual second end-to-end run, diffed ---
