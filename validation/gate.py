@@ -22,17 +22,12 @@ All distances are metric (EPSG:32611, UTM 11N). Fail loud, never degrade (FM-10)
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
 import numpy as np
-import geopandas as gpd
-import pandas as pd
 import rasterio
-from rasterio import features as rfeatures
-from shapely.geometry import shape as shapely_shape, Point
-from shapely.ops import unary_union
+from shapely.geometry import Point
 
 # --- P1.1 bootstrap: make the project root importable so `from src...` resolves in EVERY
 # context. This file is loaded by the standalone run (`python validation/gate.py`), by the
@@ -75,16 +70,19 @@ from src.delineate import stage_2b_outlets, stage_2c_delineate
 # extracted verbatim to src/score.py. gate computes the raw SBS raster (load_burn) and the per-cell
 # slope raster (mean_slope_tan) at the call site and passes them in; the frozen formula lives there.
 from src.score import stage_2e_score
+# P1.6: write_outputs (+ the SCREENING_STATEMENT A11 framing it emits) extracted verbatim to
+# src/outputs.py (the DAG sink). gate passes out_dir / dem_tif / burn_source explicitly; outputs
+# never re-derives the burn source (A4/A15). DEM-transform re-open preserved (see report).
+from src.outputs import write_outputs
 
 # CELL_AREA_KM2 is a DERIVATION of CELL_M (m^2 per cell -> km^2), not a standalone tunable;
 # per the P1.1 named-binding rule it stays computed here at its use-site from the imported
 # CELL_M (= 1e-4 km^2/cell), not extracted into config.py.
 CELL_AREA_KM2  = (CELL_M * CELL_M) / 1.0e6 # m^2 per cell -> km^2 (= 1e-4 km^2/cell)
 
-SCREENING_STATEMENT = ("Within-fire relative screening ranking of watersheds warranting closer "
-                       "assessment -- not a prediction of where debris will go. Not cross-fire comparable.")
-# BURN_SOURCE (A4/A11 provenance) now lives in src/ingest.py and is imported above -- single
-# source of truth; write_outputs reads the imported value (SCREENING_STATEMENT stays here).
+# SCREENING_STATEMENT (A11 framing) now lives in src/outputs.py, the module that emits it (P1.6).
+# BURN_SOURCE (A4/A11 provenance) lives in src/ingest.py and is imported above -- single source of
+# truth; gate threads it to write_outputs as an arg (outputs never re-derives the burn source).
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -248,60 +246,8 @@ def evaluate(basins, ranked, creek_nearest, match_m):
 # ---------------------------------------------------------------------------
 # outputs
 # ---------------------------------------------------------------------------
-def write_outputs(basins, creek_nearest):
-    """Write validation/out/{ranking.csv, basins.geojson}, stamped SBS + screening (A4/A11)."""
-    OUT.mkdir(parents=True, exist_ok=True)
-    nearest_by_basin = {}
-    for creek, info in creek_nearest.items():
-        bid = info["basin_id"]
-        if bid not in nearest_by_basin or info["dist_m"] < nearest_by_basin[bid][1]:
-            nearest_by_basin[bid] = (creek, info["dist_m"])
-
-    rows = []
-    for b in sorted(basins, key=lambda x: x["rank"]):
-        near = nearest_by_basin.get(b["basin_id"], (None, None))
-        rows.append({
-            "basin_id": b["basin_id"], "rank": b["rank"], "score": round(b["score"], 6),
-            "mean_burn": round(b["mean_burn"], 4), "mean_slope": round(b["mean_slope"], 4),
-            "area_km2": round(b["area_km2"], 4), "burn_coverage_frac": round(b["burn_coverage_frac"], 4),
-            "drains_to_asset": True, "flowed": b["flowed"],
-            "matched_creek": b["matched_creek"],
-            "nearest_outlet_dist_m": round(near[1], 1) if near[1] is not None else "",
-        })
-    df = pd.DataFrame(rows)
-    csv_path = OUT / "ranking.csv"
-    with open(csv_path, "w") as fh:
-        fh.write(f"# {SCREENING_STATEMENT}\n")
-        fh.write(f"# burn_source={BURN_SOURCE}  validation_case=Thomas_Fire_2017/Montecito_2018\n")
-        df.to_csv(fh, index=False)
-
-    # basins.geojson: vectorise each basin mask, reproject to EPSG:4326 (GeoJSON convention)
-    transform = None
-    with rasterio.open(DEM_TIF) as s:
-        transform = s.transform
-    geoms, props = [], []
-    for b in sorted(basins, key=lambda x: x["rank"]):
-        mask = b["mask"].astype(np.uint8)
-        polys = [shapely_shape(geom) for geom, val in
-                 rfeatures.shapes(mask, mask=b["mask"], transform=transform) if val == 1]
-        geoms.append(unary_union(polys))
-        props.append({"basin_id": b["basin_id"], "rank": b["rank"], "score": round(b["score"], 6),
-                      "mean_burn": round(b["mean_burn"], 4), "mean_slope": round(b["mean_slope"], 4),
-                      "area_km2": round(b["area_km2"], 4),
-                      "burn_coverage_frac": round(b["burn_coverage_frac"], 4),
-                      "flowed": b["flowed"], "matched_creek": b["matched_creek"],
-                      "burn_source": BURN_SOURCE, "screening": SCREENING_STATEMENT})
-    gdf = gpd.GeoDataFrame(props, geometry=geoms, crs=CANONICAL_CRS).to_crs("EPSG:4326")
-    gj_path = OUT / "basins.geojson"
-    gdf.to_file(gj_path, driver="GeoJSON")
-    # inject a top-level provenance member (A4/A11)
-    with open(gj_path) as fh:
-        fc = json.load(fh)
-    fc["provenance"] = {"burn_source": BURN_SOURCE, "screening": SCREENING_STATEMENT,
-                        "validation_case": "Thomas_Fire_2017/Montecito_2018", "crs": "EPSG:4326"}
-    with open(gj_path, "w") as fh:
-        json.dump(fc, fh)
-    return csv_path, gj_path, df
+# write_outputs (ranking.csv + basins.geojson + provenance/screening stamping) -> src/outputs.py
+# (P1.6). gate calls it from main() with explicit args (OUT, DEM_TIF, BURN_SOURCE); see run summary.
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +370,7 @@ def main() -> None:
         print(f"     {mm:7d} {cnt:6d} {intop:>7} {str(sixsix):>8} {str(r1):>9}")
 
     # --- outputs ---
-    csv_path, gj_path, _ = write_outputs(basins, R["creek_nearest"])
+    csv_path, gj_path, _ = write_outputs(basins, R["creek_nearest"], OUT, DEM_TIF, BURN_SOURCE)
     print(f"\n[out] wrote {csv_path.relative_to(ROOT.parent)} and {gj_path.relative_to(ROOT.parent)}")
 
     # --- determinism: actual second end-to-end run, diffed ---
