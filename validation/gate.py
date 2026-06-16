@@ -31,7 +31,6 @@ import geopandas as gpd
 import pandas as pd
 import rasterio
 from rasterio import features as rfeatures
-from scipy.spatial import cKDTree
 from shapely.geometry import shape as shapely_shape, Point
 from shapely.ops import unary_union
 
@@ -48,10 +47,6 @@ if str(_REPO_ROOT) not in sys.path:
 # imported back BY NAME (rebinds them as gate globals, so existing `gate.X` / bare-name
 # references still resolve). EXTRACTED verbatim, not redefined: exactly one binding each. ---
 from src.config import (
-    CONTOUR_M,
-    ACC_THRESHOLD_CELLS,
-    MIN_BASIN_KM2,
-    DRAINS_TO_ASSET_M,
     TRUTH_MATCH_M,
     BURN_WEIGHTS,
     BURN_LOW_COVERAGE,
@@ -63,7 +58,6 @@ from src.config import (
     MASTER_ORDER_LO,
     MASTER_ORDER_HI,
     DIRMAP,
-    D8_OFFSETS,
 )
 # Shared fail-loud exception + coordinate/CRS helpers (extracted verbatim to src/grids.py).
 from src.grids import GateAbort, _assert_metric_crs, _rc_to_xy
@@ -74,6 +68,10 @@ from src.ingest import load_dem, load_burn, load_assets, load_creeks, BURN_SOURC
 # P1.3: the five-step pysheds flow chain extracted verbatim to src/hydrology.py. gate threads the
 # grid+dem in and the (fdir, acc) products out; master-outlet detection + catchment stay here (P1.4).
 from src.hydrology import run_hydrology
+# P1.4: canyon-mouth outlet detection + catchment delineation extracted verbatim to
+# src/delineate.py (the FM-1 index-mode catchment lives there). gate unpacks hydro at the call
+# site and passes explicit args; scoring, evaluate, and the master-outlet block stay here.
+from src.delineate import stage_2b_outlets, stage_2c_delineate
 
 # CELL_AREA_KM2 is a DERIVATION of CELL_M (m^2 per cell -> km^2), not a standalone tunable;
 # per the P1.1 named-binding rule it stays computed here at its use-site from the imported
@@ -143,94 +141,10 @@ def classify_master_zone(area_km2: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 2b -- canyon-mouth outlets
+# 2b canyon-mouth outlets + 2c delineate/discard/drains-to-asset/dedup -> src/delineate.py (P1.4).
+# gate unpacks hydro and passes explicit args (see run_pipeline); the FM-1 index-mode catchment +
+# both 0-km^2 guards + the claim-order statefulness live there, lifted verbatim.
 # ---------------------------------------------------------------------------
-def stage_2b_outlets(hydro) -> list[tuple[int, int]]:
-    """Channel cells (acc > threshold) that cross the 150 m contour going downhill.
-
-    A channel cell with raw elevation >= CONTOUR_M whose D8-downstream neighbour's raw
-    elevation is < CONTOUR_M is a canyon-mouth outlet (VALIDATION_REPORT s3.2). Contour
-    test on RAW terrain; routing on conditioned-DEM fdir. Returns (row, col) tuples.
-    """
-    acc, fdir, dem_raw, shape = hydro["acc"], hydro["fdir"], hydro["dem_raw"], hydro["shape"]
-    nrows, ncols = shape
-    channel = acc > ACC_THRESHOLD_CELLS
-
-    outlets: list[tuple[int, int]] = []
-    cand_rows, cand_cols = np.where(channel & (dem_raw >= CONTOUR_M))
-    for r, c in zip(cand_rows.tolist(), cand_cols.tolist()):
-        off = D8_OFFSETS.get(int(fdir[r, c]))
-        if off is None:
-            continue
-        nr, nc = r + off[0], c + off[1]
-        if 0 <= nr < nrows and 0 <= nc < ncols and dem_raw[nr, nc] < CONTOUR_M:
-            outlets.append((r, c))
-
-    if not outlets:
-        raise GateAbort("Zero canyon-mouth outlets detected -- contour/accumulation logic "
-                        "or the AOI is wrong (FM-10). Refusing empty result.")
-    return sorted(outlets)  # stable order
-
-
-# ---------------------------------------------------------------------------
-# 2c -- delineate, discard, drains-to-asset, dedup (DETERMINISTIC)
-# ---------------------------------------------------------------------------
-def stage_2c_delineate(hydro, outlets, asset_xy):
-    """Delineate, discard tiny, keep asset-draining, dedup (larger basins claim first).
-
-    Order (an operational choice; report lists these as prose, s3.3): delineate ->
-    discard raw < MIN_BASIN_KM2 -> drains-to-asset (basin CHANNEL cells -> nearest asset
-    <= 600 m, "channel reaches within 600 m of the building layer") -> dedup -> re-discard.
-
-    Determinism: dedup ties break by (-area, row, col); basin_id assigned by sorting the
-    surviving basins on outlet (row, col). Geometry is unchanged from Part 1 (no exact
-    area ties exist with float areas; the keys only canonicalise label/claim order).
-    """
-    grid, acc, transform, shape = (hydro["grid"], hydro["acc"],
-                                   hydro["transform"], hydro["shape"])
-    fdir_raster = hydro["fdir_raster"]
-    channel = acc > ACC_THRESHOLD_CELLS
-    asset_tree = cKDTree(asset_xy)
-
-    raw = []  # surviving (outlet, mask, raw_area, asset_dist)
-    for (r, c) in outlets:
-        # INDEX mode mandatory (FM-1: coordinate mode silently returns 0 km^2).
-        mask = np.asarray(grid.catchment(x=int(c), y=int(r), fdir=fdir_raster,
-                                         dirmap=DIRMAP, xytype="index", routing="d8"), dtype=bool)
-        area = int(mask.sum()) * CELL_AREA_KM2
-        if not np.isfinite(area) or area <= 0.0:
-            raise GateAbort(f"Outlet (row={r}, col={c}) delineated to {area} km^2 "
-                            "(0 / non-finite) -- FM-1 bug class. Aborting.")
-        if area < MIN_BASIN_KM2:
-            continue
-        ch_rows, ch_cols = np.where(mask & channel)
-        if ch_rows.size == 0:
-            continue
-        dmin = float(np.min(asset_tree.query(_rc_to_xy(ch_rows, ch_cols, transform), k=1)[0]))
-        if dmin <= DRAINS_TO_ASSET_M:
-            raw.append({"outlet": (r, c), "mask": mask, "raw_km2": area, "asset_m": dmin})
-
-    if not raw:
-        raise GateAbort("No basins survive discard + drains-to-asset -- FM-10.")
-
-    # dedup: larger claims first; ties -> (-area, row, col) for determinism
-    raw.sort(key=lambda b: (-b["raw_km2"], b["outlet"][0], b["outlet"][1]))
-    claimed = np.zeros(shape, dtype=bool)
-    kept = []
-    for b in raw:
-        own = b["mask"] & ~claimed
-        own_km2 = int(own.sum()) * CELL_AREA_KM2
-        if own_km2 < MIN_BASIN_KM2:
-            continue
-        claimed |= own
-        kept.append({"outlet": b["outlet"], "mask": own,
-                     "area_km2": own_km2, "asset_m": b["asset_m"]})
-
-    # stable basin_id by outlet (row, col)
-    kept.sort(key=lambda b: (b["outlet"][0], b["outlet"][1]))
-    for i, b in enumerate(kept):
-        b["basin_id"] = i
-    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -437,11 +351,13 @@ def run_pipeline():
     if zone == "ABORT":
         raise GateAbort(f"Master outlet {hydro['master_km2']:.2f} km^2 in ABORT zone (FM-1).")
 
-    outlets = stage_2b_outlets(hydro)
+    # unpack hydro at the call site (dict-key coupling stays in gate, not in delineate); src/delineate.py
+    outlets = stage_2b_outlets(hydro["acc"], hydro["fdir"], hydro["dem_raw"], hydro["shape"])
     assets = load_assets(ASSETS_GJ)          # GeoDataFrame; src/ingest.py
     _assert_metric_crs(assets.crs, "assets.geojson")
     asset_xy = np.column_stack([assets.geometry.x.values, assets.geometry.y.values])
-    basins = stage_2c_delineate(hydro, outlets, asset_xy)
+    basins = stage_2c_delineate(hydro["grid"], hydro["acc"], hydro["fdir_raster"],
+                                hydro["transform"], hydro["shape"], outlets, asset_xy)
 
     ranked, n_ties = stage_2e_score(hydro, basins)
 
