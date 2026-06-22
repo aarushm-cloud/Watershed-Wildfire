@@ -1,0 +1,113 @@
+{
+  "phase": "P3.2",
+  "decision": "A24 (P3.1 pre-registration)",
+  "fire": "South Fork 2024 (sfk2024)",
+  "sciencebase_item": "68c493a0d4be021a00d8cd9c",
+  "p3_2_blocker": "RESOLVED (A25, P3.3). The frozen pipeline was CRS-locked to EPSG:32611, while A24 \u00a73 makes the grid/CRS the one legitimate per-fire change and South Fork's grid is EPSG:32613. A25 made CANONICAL_CRS per-fire (threaded via dem_profile[crs], Montecito 32611 behavior-lock byte-unchanged), so src.ingest.ingest_dnbr_both_arms now runs clean on the 32613 grid. Acquisition deliverables (DEM/dNBR/reference/assets/scenes) are complete; the ingest-dependent checks (b-f,i) PASS. See docs/P3.2_BUILD_REPORT.md and the A25 commit.",
+  "frozen_grid": {
+    "crs": "EPSG:32613",
+    "cell_m": 10.0,
+    "shape_rows_cols": [
+      966,
+      1439
+    ],
+    "transform": [
+      10.0,
+      0.0,
+      426400.8,
+      0.0,
+      -10.0,
+      3697312.6
+    ],
+    "bbox": [
+      426400.8,
+      3687652.6,
+      440790.8,
+      3697312.6
+    ],
+    "frozen_bbox_A24": [
+      426400.8,
+      3687653.6,
+      440794.1,
+      3697312.6
+    ]
+  },
+  "scenes": {
+    "pre": {
+      "id": "LC09_L2SP_033037_20240612_02_T1",
+      "date": "2024-06-12",
+      "wrs_path_row": "033/037",
+      "scene_cloud_pct": 1.59,
+      "aoi_cloud_pct_qa": 6.32,
+      "perimeter_cloud_pct_qa": 6.32,
+      "bbox_cloud_pct_qa": 13.62
+    },
+    "post": {
+      "id": "LC09_L2SP_032037_20240707_02_T1",
+      "date": "2024-07-07",
+      "wrs_path_row": "032/037",
+      "scene_cloud_pct": 0.0,
+      "aoi_cloud_pct_qa": 0.0,
+      "perimeter_cloud_pct_qa": 0.0,
+      "bbox_cloud_pct_qa": 0.0
+    },
+    "sensor": "Landsat-9 (OLI-2)",
+    "aoi_cloud_definition": "_qa_cloud_mask bits (1,2,3,4)=dilated/cirrus/cloud/shadow (frozen p2 basis); REPORT-ONLY, NOT removed from product. Two regions reported: PERIMETER (within the USGS fire perimeter) is the freeze-gate basis and reproduces the frozen 6.3%/0% (build: 6.32%/0.0%); BBOX (full AOI) is context only and runs higher because out-of-burn AOI-margin cloud (below-floor, non-covered, weight 0) is counted. Acceptance (a) uses the PERIMETER value.",
+    "aoi_cloud_union_pct_qa": 13.62,
+    "cross_path_note": "Pre 033/037, post 032/037 (frozen dates fall on adjacent LC09 overpasses; AOI in the 032/033 sidelap). Co-registered on the common C2 30 m lattice (both UL 15 m mod 30); the frozen tpre==tpost guard confirms pixel alignment. A characteristic, not a deviation. Differs from Thomas (same path 042/036). dNBR sensor/processing caveat unchanged (A21/A4).",
+    "cloud_not_removed": "QA fill-bit masked only; cloud measured, NOT removed (Decision A)"
+  },
+  "dnbr": {
+    "nbr_formula": "(NIR - SWIR2)/(NIR + SWIR2), surface reflectance after DN*2.75e-5-0.2",
+    "dnbr_formula": "NBR_pre - NBR_post",
+    "scale": "raw (NOT x1000)",
+    "stats_raw": {
+      "min": -1.285256028175354,
+      "max": 1.2382062673568726,
+      "mean": 0.05901766195893288,
+      "valid_frac": 0.8547
+    },
+    "resampling": {
+      "arm_a": "nearest",
+      "arm_b": "bilinear"
+    },
+    "source_endpoint": "Microsoft Planetary Computer STAC + SAS (landsat-c2-l2)"
+  },
+  "dem": {
+    "endpoint": "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/n34w106/USGS_13_n34w106.tif",
+    "native_crs": "EPSG:4269",
+    "vintage_tags": {
+      "BandDefinitionKeyword": "*",
+      "DataType": "*",
+      "AREA_OR_POINT": "Area"
+    },
+    "elev_min_max_m": [
+      1975.72705078125,
+      3311.972900390625
+    ]
+  },
+  "reference": {
+    "version": "1.0",
+    "assessment_date": "2024-07-01",
+    "n_basins": 192,
+    "files": "Shapefiles.zip (basins/outlets/segments/perimeter)",
+    "note": "stored read-only; NO spatial join (P3.4); v3.0 NOT pulled"
+  },
+  "assets": {
+    "source": "OpenStreetMap buildings via Overpass (osmnx)",
+    "n_buildings": 633,
+    "out_crs": "EPSG:32613"
+  },
+  "raster_sha256": {
+    "data/southfork/dem/dem.tif": "82605058480ec7dfbabbaaecbe26d38460f6462b113527f6212bee1dd28d80c8",
+    "data/southfork/burn/southfork_dnbr/dnbr_native.tif": "476b2af284530c67b79b5a3adc443dd3f7d5542479042671133031b42d4f768f",
+    "data/southfork/burn/dnbr_a.tif": "9a5829dfead092e1a7b0f3186472d580952b5025297da3742031a442bbf6fa60",
+    "data/southfork/burn/dnbr_b.tif": "c8a10d64c1df3da495435b9d9b2711993b001053a9dec9eb0dd581963e5df2dc",
+    "data/southfork/burn/arm_a_weight.tif": "fdee59d8d1b57bbeb5fef6920d2f54470b31e3ebfb1414289ad2e29e1496f9b9",
+    "data/southfork/burn/arm_b_weight.tif": "26ea8408b0b43d1ee5d6565483a16b14ad3bd660b8bc1ea6f12d5fd0f0159cdb",
+    "data/southfork/burn/arm_a_cls.tif": "42def43c76cf2e80c8c510b9fc3549d61b557f06a9a6a12c313772de2d26bf39",
+    "data/southfork/burn/valid.tif": "79938f0d17ea3c2cefc71a239428dbef0aaa9a852509dc989cc45b69830a94d5"
+  },
+  "rasters_missing": [],
+  "retrieval_note": "endpoints re-verified reachable 2026-06-19 (MPC STAC intermittently 504 during build; DEM/ScienceBase/Overpass OK)."
+}

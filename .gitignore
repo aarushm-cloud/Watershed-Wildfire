@@ -10,6 +10,9 @@
 # Gate-regenerated outputs -- the behavior lock is the oracle, not these files (OUT-CLEANUP)
 /validation/out/
 
+# osmnx request cache (P3 asset acquisition) -- never staged
+/cache/
+
 # Python
 __pycache__/
 *.py[cod]
