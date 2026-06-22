@@ -46,7 +46,12 @@ DNBR_NODATA_FAILLOUD_FRAC = 0.20
 BURN_LOW_COVERAGE = 0.80      # flag basins with < this fraction of SBS-covered cells (C8 caveat)
 
 # --- canonical grid (the validation case CRS; metres) ---
-CANONICAL_CRS  = "EPSG:32611"
+CANONICAL_CRS  = "EPSG:32611"   # Montecito/UTM-11N validation zone; the PER-FIRE DEFAULT (A25)
+# A25: the per-fire CRS becomes additive -- callers default to CANONICAL_CRS, but a fire's own
+# DEM CRS is threaded where it matters. This allowlist is the loud gate on which metric UTM zones
+# may be ingested: add the zone when onboarding a fire; a missing zone fails loud (not a silent
+# degrade). Montecito = 32611 (validation), South Fork 2024 = 32613 (P3 generalization fire).
+ALLOWED_UTM_ZONES = {32611, 32613}
 CELL_M         = 10.0                      # DEM resolution (m); dx = dy = 10 m
 # NOTE: CELL_AREA_KM2 (= CELL_M**2 / 1e6) is a DERIVATION, not a standalone tunable; per the
 # P1.1 named-binding rule it stays computed at its use-site in gate.py from this CELL_M,

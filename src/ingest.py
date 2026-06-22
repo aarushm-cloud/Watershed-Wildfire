@@ -254,8 +254,10 @@ def ingest_dnbr_both_arms(native_path, dem_profile):
     dnbr_b, prof_b = reproject_dnbr(native_path, dem_profile, Resampling.bilinear)   # Arm B: bilinear
 
     # Alignment to the canonical DEM grid MUST hold before any thresholding (P2.1 §5; fail loud A7/A8).
-    assert_aligned(dem_profile, prof_a, other_name="dNBR-A")
-    assert_aligned(dem_profile, prof_b, other_name="dNBR-B")
+    # A25: the expected zone is THIS fire's DEM CRS (dem_profile["crs"]), not the hardcoded validation
+    # zone -- so a 32613 (South Fork) run passes here instead of GateAbort-ing on the 32611 default.
+    assert_aligned(dem_profile, prof_a, other_name="dNBR-A", expected_crs=dem_profile["crs"])
+    assert_aligned(dem_profile, prof_b, other_name="dNBR-B", expected_crs=dem_profile["crs"])
 
     # ONE shared valid footprint, from Arm A's nearest reproject (P2.1 §1: same footprint both arms).
     valid = (dnbr_a != DNBR_NODATA) & np.isfinite(dnbr_a)

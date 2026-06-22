@@ -5,8 +5,9 @@ is / is not' framing. See ARCHITECTURE.md and DECISIONS A4/A11.
 P1.6 SCOPE (behavior-preserving extract from validation/gate.py): write_outputs + the
 SCREENING_STATEMENT (A11) framing it emits, lifted VERBATIM. EXPLICIT-ARGS signature (no dict-bag):
 out_dir, dem_tif (path for the transform re-open), and burn_source (provenance, READ-ONLY) arrive as
-named args -- this module is the DAG SINK: it imports config only (CANONICAL_CRS) + third-party, and
-NEVER imports ingest/score/delineate/hydrology/grids, never re-derives or re-asserts the burn source
+named args -- this module is the DAG SINK: it imports only third-party (NO project modules at all,
+A25: the per-fire output CRS is read off the DEM handle, not from config), and NEVER imports
+ingest/score/delineate/hydrology/grids/config, never re-derives or re-asserts the burn source
 (A4/A15: burn-source selection lives only in ingest). Serialization + formatting only -- it writes the
 `rank` score/delineate produced, never recomputes it. No new types (C9).
 
@@ -28,8 +29,6 @@ import rasterio
 from rasterio import features as rfeatures
 from shapely.geometry import shape as shapely_shape
 from shapely.ops import unary_union
-
-from src.config import CANONICAL_CRS
 
 # A11 framing stamped into every artifact -- screening, never prediction. Byte-identical; do not reword.
 SCREENING_STATEMENT = ("Within-fire relative screening ranking of watersheds warranting closer "
@@ -72,6 +71,8 @@ def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source):
     transform = None
     with rasterio.open(dem_tif) as s:
         transform = s.transform
+        dem_crs = s.crs              # A25: per-fire decided CRS, read from the DEM (== dem_profile["crs"],
+        #                              the same CRS gate.py validates the DEM against). NOT a 2nd decision.
     geoms, props = [], []
     for b in sorted(basins, key=lambda x: x["rank"]):
         mask = b["mask"].astype(np.uint8)
@@ -84,7 +85,7 @@ def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source):
                       "burn_coverage_frac": round(b["burn_coverage_frac"], 4),
                       "flowed": b["flowed"], "matched_creek": b["matched_creek"],
                       "burn_source": burn_source, "screening": SCREENING_STATEMENT})
-    gdf = gpd.GeoDataFrame(props, geometry=geoms, crs=CANONICAL_CRS).to_crs("EPSG:4326")
+    gdf = gpd.GeoDataFrame(props, geometry=geoms, crs=dem_crs).to_crs("EPSG:4326")
     gj_path = out_dir / "basins.geojson"
     gdf.to_file(gj_path, driver="GeoJSON")
     # inject a top-level provenance member (A4/A11)

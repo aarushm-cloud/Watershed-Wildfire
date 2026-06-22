@@ -40,6 +40,46 @@ CELL_AREA_KM2 = (CELL_M * CELL_M) / 1.0e6
 
 
 # ---------------------------------------------------------------------------
+# A25 carve-out (council Q3) -- fail loud if CONTOUR_M is grossly mis-set for this fire's DEM.
+# ---------------------------------------------------------------------------
+def assert_contour_in_dem_range(dem_raw: np.ndarray, dem_nodata, *,
+                                contour_m: float = CONTOUR_M) -> None:
+    """Fail loud unless the mountain-front contour CONTOUR_M (m) falls inside the DEM's VALID
+    elevation range. Catches the GROSS mis-set: an entirely-wrong fire's contour for this DEM --
+    e.g. the 150 m Montecito value on South Fork's 1976-3312 m DEM (below the DEM minimum) -- which
+    would otherwise make stage_2b_outlets straddle no cell and yield zero/wrong canyon-mouth
+    outlets. Converts that one silent footgun (the per-fire CRS work does not touch it) into a
+    clear abort. Keys off `dem_raw`, the SAME raw metric array (m) stage_2b_outlets applies the
+    contour to (lines below: `dem_raw >= CONTOUR_M`), so the guard and the test see one elevation.
+
+    SCOPE (do not oversell): catches a contour OUTSIDE the DEM range only -- NOT geomorphic
+    correctness. An in-range-but-wrong contour still passes; per-fire contour tuning is out of A25
+    scope and stays a documented limitation.
+
+    dem_raw     -- raw metric DEM (m); the contour-test array.
+    dem_nodata  -- the DEM's nodata sentinel. CRITICAL (FM-12): pysheds defaults an UNDECLARED
+                   nodata to 0, so for such a DEM this is 0 and the 0-fill cells MUST be excluded --
+                   otherwise the valid min collapses to 0, `0 <= contour <= max` is trivially true,
+                   and the guard silently never fires (the guard-killing trap). Cells == dem_nodata
+                   (and any non-finite) are excluded from the min/max. Pass None only if there is
+                   genuinely no sentinel (then only non-finite cells are dropped).
+    """
+    valid = np.isfinite(dem_raw)
+    if dem_nodata is not None:
+        valid &= (dem_raw != dem_nodata)        # FM-12: drop nodata-as-0 fill, never count it as terrain
+    if not valid.any():
+        raise GateAbort("CONTOUR_M guard: DEM has no valid (non-nodata) cells -- cannot range-check "
+                        "the contour (FM-10).")
+    lo = float(dem_raw[valid].min())            # min valid terrain elevation (m)
+    hi = float(dem_raw[valid].max())            # max valid terrain elevation (m)
+    if not (lo <= contour_m <= hi):
+        raise GateAbort(
+            f"CONTOUR_M={contour_m} m is outside this DEM's valid elevation range "
+            f"[{lo:.1f}, {hi:.1f}] m -- the wrong fire's contour for this DEM (it would yield "
+            f"zero/wrong canyon-mouth outlets). Set CONTOUR_M for this fire. (A25 carve-out)")
+
+
+# ---------------------------------------------------------------------------
 # 2b -- canyon-mouth outlets
 # ---------------------------------------------------------------------------
 def stage_2b_outlets(acc, fdir, dem_raw, shape) -> list[tuple[int, int]]:

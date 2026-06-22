@@ -70,7 +70,7 @@ from src.hydrology import run_hydrology
 # P1.4: canyon-mouth outlet detection + catchment delineation extracted verbatim to
 # src/delineate.py (the FM-1 index-mode catchment lives there). gate unpacks hydro at the call
 # site and passes explicit args; scoring, evaluate, and the master-outlet block stay here.
-from src.delineate import stage_2b_outlets, stage_2c_delineate
+from src.delineate import stage_2b_outlets, stage_2c_delineate, assert_contour_in_dem_range
 # P1.5/P2.2a: frozen scoring + ranking in src/score.py. The A17 weight raster + A18 coverage mask are
 # now produced by the ingest seam (ingest_burn) and passed in alongside the per-cell slope raster
 # (mean_slope_tan, computed at the call site); the frozen formula + per-basin reduction live there.
@@ -112,6 +112,8 @@ def stage_2a_hydrology():
             raise GateAbort(f"DEM resolution {(transform.a, transform.e)} != {CELL_M} m.")
 
     grid, dem, dem_raw = load_dem(DEM_TIF)   # pysheds Grid + Raster + raw float64 elev (m); src/ingest.py
+    dem_nodata = dem.nodata                   # nodata sentinel (pysheds defaults undeclared -> 0, FM-12);
+    #                                           threaded to the A25 CONTOUR_M guard so 0-fill isn't terrain.
 
     fdir, acc = run_hydrology(grid, dem)   # 5-step pysheds chain (fdir/acc Rasters); src/hydrology.py
 
@@ -127,7 +129,7 @@ def stage_2a_hydrology():
                            dirmap=DIRMAP, xytype="index", routing="d8")
     master_km2 = int(np.asarray(catch).sum()) * CELL_AREA_KM2
 
-    return {"grid": grid, "dem_raw": dem_raw, "fdir_raster": fdir,
+    return {"grid": grid, "dem_raw": dem_raw, "dem_nodata": dem_nodata, "fdir_raster": fdir,
             "fdir": np.asarray(fdir), "acc": acc_arr, "transform": transform,
             "shape": shape, "master_rowcol": (int(mrow), int(mcol)),
             "master_acc_cells": int(acc_arr[mrow, mcol]), "master_km2": master_km2}
@@ -263,6 +265,10 @@ def run_pipeline():
     if zone == "ABORT":
         raise GateAbort(f"Master outlet {hydro['master_km2']:.2f} km^2 in ABORT zone (FM-1).")
 
+    # A25 carve-out: fail loud if CONTOUR_M is grossly mis-set for this DEM BEFORE detecting outlets
+    # (else a wrong-fire contour silently yields zero/wrong canyon mouths). Montecito 150 m is inside
+    # [~0, 1199] m -> passes; runs on the same dem_raw the contour test uses. src/delineate.py
+    assert_contour_in_dem_range(hydro["dem_raw"], hydro["dem_nodata"])
     # unpack hydro at the call site (dict-key coupling stays in gate, not in delineate); src/delineate.py
     outlets = stage_2b_outlets(hydro["acc"], hydro["fdir"], hydro["dem_raw"], hydro["shape"])
     assets = load_assets(ASSETS_GJ)          # GeoDataFrame; src/ingest.py
