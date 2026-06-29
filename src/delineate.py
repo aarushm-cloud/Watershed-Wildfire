@@ -20,6 +20,8 @@ derivation; no filesystem access. Imports numpy + scipy.cKDTree (third-party) an
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -37,6 +39,33 @@ from src.grids import GateAbort, _rc_to_xy
 # CELL_AREA_KM2 is the P1.1 gate-local derivation, recomputed here from CELL_M (same value, no new
 # config binding): m^2 per cell -> km^2 (= 1e-4 km^2/cell). Pure arithmetic, no import-time I/O.
 CELL_AREA_KM2 = (CELL_M * CELL_M) / 1.0e6
+
+_log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Shared valid-cell definition -- single source of truth (A27).
+# ---------------------------------------------------------------------------
+def _valid_dem_mask(dem_raw: np.ndarray, dem_nodata) -> np.ndarray:
+    """Boolean mask of valid DEM cells (finite AND != nodata). Single source of truth; both
+    assert_contour_in_dem_range and assess_hypsometric_applicability use this, so the two guards
+    can never disagree about which cells are terrain.
+
+    Definition (carried VERBATIM from the original assert_contour_in_dem_range masking, so the
+    extract is behavior-identical -- proven by the mask-parity checksum test on the Montecito DEM):
+      valid = finite cells, AND (when a nodata sentinel exists) cells != that sentinel.
+
+    dem_raw     -- raw metric DEM (m).
+    dem_nodata  -- the DEM's nodata sentinel. CRITICAL (FM-12): pysheds defaults an UNDECLARED
+                   nodata to 0, so for such a DEM this is 0 and the 0-fill cells MUST be excluded
+                   (otherwise the valid min collapses to 0). Cells == dem_nodata (and any
+                   non-finite) are excluded. Pass None only if there is genuinely no sentinel
+                   (then only non-finite cells are dropped).
+    """
+    valid = np.isfinite(dem_raw)
+    if dem_nodata is not None:
+        valid &= (dem_raw != dem_nodata)        # FM-12: drop nodata-as-0 fill, never count it as terrain
+    return valid
 
 
 # ---------------------------------------------------------------------------
@@ -64,9 +93,7 @@ def assert_contour_in_dem_range(dem_raw: np.ndarray, dem_nodata, *,
                    (and any non-finite) are excluded from the min/max. Pass None only if there is
                    genuinely no sentinel (then only non-finite cells are dropped).
     """
-    valid = np.isfinite(dem_raw)
-    if dem_nodata is not None:
-        valid &= (dem_raw != dem_nodata)        # FM-12: drop nodata-as-0 fill, never count it as terrain
+    valid = _valid_dem_mask(dem_raw, dem_nodata)   # shared single-source definition (A27); same cells as before
     if not valid.any():
         raise GateAbort("CONTOUR_M guard: DEM has no valid (non-nodata) cells -- cannot range-check "
                         "the contour (FM-10).")
@@ -77,6 +104,70 @@ def assert_contour_in_dem_range(dem_raw: np.ndarray, dem_nodata, *,
             f"CONTOUR_M={contour_m} m is outside this DEM's valid elevation range "
             f"[{lo:.1f}, {hi:.1f}] m -- the wrong fire's contour for this DEM (it would yield "
             f"zero/wrong canyon-mouth outlets). Set CONTOUR_M for this fire. (A25 carve-out)")
+
+
+# ---------------------------------------------------------------------------
+# A27 -- terrain-applicability refusal trigger (frozen hypsometric-span rule).
+# DECISIONS.md A27 / A27.1. The 50 m constant is pre-registered and FROZEN: never tuned, never
+# per-fire, no parameter, no config.py override. The detector reads only WHETHER a contour is
+# well-posed (a boolean over the hypsometry span); it returns NO absolute-elevation/contour value
+# and consumes none -- that firewall line is what keeps A27 off the category-two scoring fence.
+# ---------------------------------------------------------------------------
+HYPSOMETRIC_SPAN_THRESHOLD_M = 50.0  # A27-frozen; never tuned, never per-fire, no override
+
+
+def assess_hypsometric_applicability(dem_raw: np.ndarray, dem_nodata) -> dict:
+    """A27 terrain-applicability pre-check (frozen hypsometric-span rule).
+
+    REFUSE iff `(p10 - p1) > HYPSOMETRIC_SPAN_THRESHOLD_M` on valid (nodata-masked, finite) DEM
+    elevation, where p1, p10 are the 1st and 10th percentiles of valid-cell elevation (m). A wide
+    low tail (`p10 - p1` large) = an incised valley floor with no compact depositional plain; a
+    true range-front-over-plain compresses p1->p10 to ~20-30 m (DECISIONS A27).
+
+    FIREWALL (A27): this function reads WHETHER the contour-anchoring is well-posed, never WHAT
+    contour VALUE to use. It emits NO absolute percentile elevation and consumes none. p1/p10 are
+    computed, LOGGED, and discarded -- they are never returned, never stashed on a global/attribute.
+    `span_m = p10 - p1` is a difference (a vertical extent), the only elevation-derived number that
+    leaves the function; an absolute percentile elevation must not. Returns EXACTLY
+    `{refuse, reason_code, span_m, span_threshold_m, n_valid}` -- no p1_m/p10_m, no contour-like key.
+
+    On REFUSE the pipeline produces NO ranking: the scored basins are the upslope catchments of
+    CONTOUR_M-anchored outlets (delineate.py outlets -> basins -> scores), an anchor incised terrain
+    cannot define -- no anchor, no basins, no scores to caveat (A27.1). The caller writes a
+    structured refusal instead (src.outputs.write_refusal); this function only classifies.
+
+    dem_raw     -- raw metric DEM (m); read-only (a fancy-index copy is taken, never mutated).
+    dem_nodata  -- the DEM's nodata sentinel (see _valid_dem_mask; FM-12).
+    """
+    valid = _valid_dem_mask(dem_raw, dem_nodata)
+    vals = dem_raw[valid]                         # fancy-index COPY (m); dem_raw is never mutated
+    n_valid = int(vals.size)
+    if n_valid == 0:
+        # No valid terrain to assess -- a broken/empty DEM, not an incised-terrain refusal. Fail loud
+        # rather than emit a meaningless span (A8 fail-loud; mirrors the A25 guard's no-valid-cells case).
+        raise GateAbort("A27 hypsometric pre-check: DEM has no valid (non-nodata, finite) cells -- "
+                        "cannot assess terrain applicability (FM-10).")
+
+    # p1, p10 = 1st and 10th percentiles of valid elevation (m). method='linear' fixed (no interp drift).
+    p1, p10 = np.percentile(vals, [1, 10], method='linear')
+    p1 = float(p1)
+    p10 = float(p10)
+    span_m = float(p10 - p1)                       # vertical extent (m); the ONLY elevation-derived value returned
+    refuse = span_m > HYPSOMETRIC_SPAN_THRESHOLD_M  # strict >
+    reason_code = "REFUSED_INCISED_TERRAIN" if refuse else "OK_RANGE_FRONT_APPLICABLE"
+
+    # p1/p10 are LOGGED for diagnostics, never returned (firewall: no absolute elevation leaves).
+    _log.info("A27 hypsometric pre-check: p1=%.4f m, p10=%.4f m, span_m=%.4f m, n_valid=%d, "
+              "threshold=%.1f m, refuse=%s", p1, p10, span_m, n_valid,
+              HYPSOMETRIC_SPAN_THRESHOLD_M, refuse)
+
+    return {
+        "refuse": bool(refuse),
+        "reason_code": reason_code,
+        "span_m": span_m,
+        "span_threshold_m": HYPSOMETRIC_SPAN_THRESHOLD_M,
+        "n_valid": n_valid,
+    }
 
 
 # ---------------------------------------------------------------------------
