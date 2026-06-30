@@ -89,6 +89,10 @@ def main():
     #                   and confirm it REPRODUCES the lock (Cold Spring #1 + AUC 0.9722) before trust.
     # ---------------------------------------------------------------------------------------------
     control = gate.run_pipeline()
+    # A27 dispatch (P3.4-build-2): run_pipeline is polymorphic. The Montecito SBS control is
+    # range-front terrain, so it can only return "ranked"; fail loud if the contract ever drifts.
+    if control["status"] != "ranked":
+        raise GateAbort(f"SBS control returned status {control['status']!r}, expected 'ranked' -- HALT.")
     cbasins = control["basins"]
     cmetrics = control["metrics"]
     cranked = control["ranked"]

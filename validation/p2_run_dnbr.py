@@ -185,6 +185,10 @@ def main():
 
     # 1. SBS control fresh on HEAD -> basin set + flowed truth labels (NOT scores; no comparison).
     control = gate.run_pipeline()
+    # A27 dispatch (P3.4-build-2): run_pipeline is polymorphic. The Montecito SBS control is
+    # range-front terrain, so it can only return "ranked"; fail loud if the contract ever drifts.
+    if control["status"] != "ranked":
+        raise GateAbort(f"SBS control returned status {control['status']!r}, expected 'ranked' -- HALT.")
     cbasins = control["basins"]
     flowed_ids = sorted(b["basin_id"] for b in cbasins if b["flowed"])
     print(f"\n[control] SBS pipeline live on HEAD: {len(cbasins)} basins; flowed truth set = {flowed_ids}")

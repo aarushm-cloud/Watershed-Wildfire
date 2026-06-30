@@ -70,7 +70,8 @@ from src.hydrology import run_hydrology
 # P1.4: canyon-mouth outlet detection + catchment delineation extracted verbatim to
 # src/delineate.py (the FM-1 index-mode catchment lives there). gate unpacks hydro at the call
 # site and passes explicit args; scoring, evaluate, and the master-outlet block stay here.
-from src.delineate import stage_2b_outlets, stage_2c_delineate, assert_contour_in_dem_range
+from src.delineate import (stage_2b_outlets, stage_2c_delineate, assert_contour_in_dem_range,
+                           assess_hypsometric_applicability)
 # P1.5/P2.2a: frozen scoring + ranking in src/score.py. The A17 weight raster + A18 coverage mask are
 # now produced by the ingest seam (ingest_burn) and passed in alongside the per-cell slope raster
 # (mean_slope_tan, computed at the call site); the frozen formula + per-basin reduction live there.
@@ -78,7 +79,7 @@ from src.score import stage_2e_score
 # P1.6: write_outputs (+ the SCREENING_STATEMENT A11 framing it emits) extracted verbatim to
 # src/outputs.py (the DAG sink). gate passes out_dir / dem_tif / burn_source explicitly (burn_source
 # from the ingest seam's provenance, A4/A15); outputs never re-derives it. DEM-transform re-open kept.
-from src.outputs import write_outputs
+from src.outputs import write_outputs, write_refusal, build_refusal_message
 
 # CELL_AREA_KM2 is a DERIVATION of CELL_M (m^2 per cell -> km^2), not a standalone tunable;
 # per the P1.1 named-binding rule it stays computed here at its use-site from the imported
@@ -256,6 +257,71 @@ def evaluate(basins, ranked, creek_nearest, match_m):
 
 
 # ---------------------------------------------------------------------------
+# A27 terrain-applicability gate (wired) + caller-side dispatch -- DECISIONS A27/A27.1, P3.4-build-2.
+# ---------------------------------------------------------------------------
+def _terrain_applicability_gate(dem_raw, dem_nodata, out_dir):
+    """A27 terrain-applicability pre-check, WIRED into the live pipeline (DECISIONS A27/A27.1).
+
+    Runs the frozen hypsometric-span detector on the RAW (pre-pit-fill) DEM. If the terrain is
+    ill-posed for CONTOUR_M outlet-anchoring (incised: valid-cell (p10 - p1) > 50 m), it writes an
+    honest refusal.json to out_dir and returns the FIREWALL-CLEAN refusal-result; otherwise it
+    returns None and the pipeline proceeds to the A25 guard unchanged. Montecito (span ~15 m) ->
+    None -> falls through, so the behavior lock is untouched.
+
+    FIREWALL (A27): the returned dict carries EXACTLY
+    {status, reason_code, span_m, span_threshold_m, message} -- span_m is a DIFFERENCE (a vertical
+    extent) and span_threshold_m the frozen 50 m; NO absolute elevation / p1 / p10 / CONTOUR_M
+    candidate crosses this boundary. write_refusal may LOG more on disk (refusal.json is a terminal
+    artifact crossing no stage boundary); this return must never widen toward that field set. The
+    detector's all-nodata GateAbort is deliberately NOT caught here -- a broken/empty DEM is a
+    fail-loud input error (A8), not an honest 'wrong terrain' refusal.
+
+    dem_raw    -- raw metric DEM (m), pre-pit-fill; the SAME array the A25 guard reads.
+    dem_nodata -- DEM nodata sentinel (FM-12: pysheds defaults an undeclared nodata to 0).
+    out_dir    -- per-fire output dir (refusal.json sink); same convention as write_outputs.
+    """
+    verdict = assess_hypsometric_applicability(dem_raw, dem_nodata)
+    if not verdict["refuse"]:
+        return None
+    write_refusal(verdict, out_dir)        # writes refusal.json only; NO ranking.csv / basins.geojson
+    return {
+        "status": "refused",
+        "reason_code": verdict["reason_code"],
+        "span_m": verdict["span_m"],                 # a difference (vertical extent, m), never an absolute elevation
+        "span_threshold_m": verdict["span_threshold_m"],
+        "message": build_refusal_message(verdict["reason_code"], verdict["span_m"],
+                                         verdict["span_threshold_m"]),
+    }
+
+
+def dispatch_result(result):
+    """Caller-side dispatch on run_pipeline's polymorphic return (A27). Returns the process EXIT
+    CODE (int).
+
+    run_pipeline now returns either a ranked-result ({"status": "ranked", ...}) or a refusal-result
+    ({"status": "refused", ...}); every caller must dispatch on that discriminator. On REFUSE this
+    emits the human refusal MESSAGE -- the ENTIRE user-facing payload of a refusal, since no
+    ranking.csv is written behind it. A refusal is an honest answer, not a crash, so it exits 0; a
+    batch caller distinguishes ranked from refused via this return's "status" (in-process) or the
+    'TERRAIN-APPLICABILITY REFUSAL' stdout marker + the on-disk refusal.json (CLI). An UNKNOWN
+    status RAISES (A8 fail-loud) -- which is exactly what keeps a future third status additive: an
+    un-taught caller fails loud rather than silently mishandling it. Dispatch is an explicit match
+    on the string, never a boolean flag or a None sentinel.
+    """
+    status = result.get("status")
+    if status == "ranked":
+        return 0
+    if status == "refused":
+        print("\n" + "=" * 74)
+        print("TERRAIN-APPLICABILITY REFUSAL (DECISIONS A27/A27.1) -- no ranking produced")
+        print("=" * 74)
+        print(result["message"])
+        return 0
+    raise GateAbort(f"run_pipeline returned unknown status {status!r} -- caller cannot dispatch "
+                    "(A8 fail-loud; an un-taught status must never be silently mishandled).")
+
+
+# ---------------------------------------------------------------------------
 # pipeline driver (2a -> 2f) + determinism + perturbation
 # ---------------------------------------------------------------------------
 def run_pipeline():
@@ -264,6 +330,15 @@ def run_pipeline():
     zone = classify_master_zone(hydro["master_km2"])
     if zone == "ABORT":
         raise GateAbort(f"Master outlet {hydro['master_km2']:.2f} km^2 in ABORT zone (FM-1).")
+
+    # A27 terrain-applicability refusal (DECISIONS A27/A27.1), wired -- runs BEFORE the A25 guard on
+    # the SAME raw pre-fill DEM. Incised terrain has no mountain-front break, so the CONTOUR_M anchor
+    # is ill-posed; emit an honest refusal (refusal.json) and return early instead of crashing on
+    # A25's downstream CONTOUR_M-out-of-range symptom. Montecito is range-front (span ~15 m) -> None
+    # -> falls through to A25 unchanged. out_dir = OUT, the same dir main()'s success path writes to.
+    refusal = _terrain_applicability_gate(hydro["dem_raw"], hydro["dem_nodata"], OUT)
+    if refusal is not None:
+        return refusal     # polymorphic: the refusal-result, NOT the ranked dict (caller dispatches on status)
 
     # A25 carve-out: fail loud if CONTOUR_M is grossly mis-set for this DEM BEFORE detecting outlets
     # (else a wrong-fire contour silently yields zero/wrong canyon mouths). Montecito 150 m is inside
@@ -289,7 +364,8 @@ def run_pipeline():
     creek_nearest = compute_creek_nearest(basins, creeks, hydro["transform"])
     metrics = evaluate(basins, ranked, creek_nearest, TRUTH_MATCH_M)
 
-    return {"hydro": hydro, "zone": zone, "outlets": outlets, "basins": basins,
+    return {"status": "ranked",   # A27 discriminator (P3.4-build-2): ranked-result vs the refusal-result above
+            "hydro": hydro, "zone": zone, "outlets": outlets, "basins": basins,
             "ranked": ranked, "n_ties": n_ties, "creeks": creeks,
             "creek_nearest": creek_nearest, "metrics": metrics,
             "provenance": provenance}   # A4/A15: single burn-source stamp from the ingest seam
@@ -320,6 +396,12 @@ def main() -> None:
     print("=" * 74)
 
     R = run_pipeline()
+    # A27 dispatch (P3.4-build-2): run_pipeline is now polymorphic. On a terrain-applicability
+    # refusal, emit the message and exit 0 (honest answer, not a crash); on an unknown status,
+    # dispatch_result raises GateAbort (fail-loud, caught below -> exit 2). Montecito -> "ranked"
+    # -> falls through to the existing body unchanged.
+    if R["status"] != "ranked":
+        sys.exit(dispatch_result(R))
     hydro, basins, ranked, m = R["hydro"], R["basins"], R["ranked"], R["metrics"]
 
     # --- 2a/2b/2c summary ---
