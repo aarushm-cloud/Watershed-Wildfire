@@ -174,7 +174,7 @@ def assess_hypsometric_applicability(dem_raw: np.ndarray, dem_nodata) -> dict:
 # 2b -- canyon-mouth outlets
 # ---------------------------------------------------------------------------
 def stage_2b_outlets(acc, fdir, dem_raw, shape) -> list[tuple[int, int]]:
-    """Channel cells (acc > threshold) that cross the 150 m contour going downhill.
+    """Channel cells (acc > threshold) that cross the CONTOUR_M mountain-front contour going downhill.
 
     A channel cell with raw elevation >= CONTOUR_M whose D8-downstream neighbour's raw
     elevation is < CONTOUR_M is a canyon-mouth outlet (VALIDATION_REPORT s3.2). Contour

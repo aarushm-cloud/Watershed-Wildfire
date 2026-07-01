@@ -16,9 +16,11 @@ and uses it at the GeoDataFrame construction site (outputs.py:87) instead of CAN
 HOW THE TEST CATCHES IT (no value-substitution): the GeoDataFrame is built and immediately
 .to_crs("EPSG:4326")'d on one chained line, so the pre-reprojection CRS is never returned. We
 therefore SPY on the gpd.GeoDataFrame constructor inside outputs and RECORD the `crs=` it is
-actually passed -- we do NOT monkeypatch the value outputs.py reads (that would bypass the very
-crs=CANONICAL_CRS hardcode under test and pass falsely). Against current code the spy records
-EPSG:32611 -> the 32613 case FAILS RED; after the A25 fix it records the DEM's CRS for both fires.
+actually passed -- we do NOT monkeypatch the value outputs.py reads. There is no current
+crs=CANONICAL_CRS hardcode; the spy-records-not-substitutes design is what lets this catch a
+regression rather than mask one -- a revert to crs=CANONICAL_CRS would be observed, not silently
+overridden. With the A25 fix in place both fires' cases record the DEM's per-fire CRS and pass
+GREEN; the guard would go RED only if the code regressed to hardcoding 32611.
 
 Run:  pytest tests/test_output_crs.py -v
 """
@@ -70,7 +72,7 @@ def _minimal_basins():
 
 # (epsg, UL-x, UL-y) -- South Fork UTM 13N (NM) and Montecito UTM 11N (CA) corners.
 _CASES = [
-    pytest.param(32613, 430000.0, 3692000.0, id="southfork_32613"),   # RED vs current (records 32611)
+    pytest.param(32613, 430000.0, 3692000.0, id="southfork_32613"),   # regression guard: catches a revert to hardcoded 32611
     pytest.param(32611, 250000.0, 3810000.0, id="montecito_32611"),   # regression: always green
 ]
 

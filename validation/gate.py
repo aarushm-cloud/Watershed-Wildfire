@@ -9,7 +9,7 @@ tests/test_behavior_lock.py). Not to be edited to make a run pass. See DECISIONS
 Sub-stages, single script (P1 modularises into src/):
   2a hydrology  -- pysheds fill pits -> fill depressions -> resolve flats ->
                    D8 flow dir -> accumulation; inline master-outlet FM-1 check
-  2b outlets    -- channel cells (acc > thresh) crossing the 150 m mountain-front
+  2b outlets    -- channel cells (acc > thresh) crossing the CONTOUR_M mountain-front
                    contour going downhill (canyon mouths)
   2c delineate  -- upslope catchment per outlet (INDEX mode); discard tiny; keep
                    asset-draining; dedup (larger basins claim cells first).
