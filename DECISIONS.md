@@ -128,3 +128,54 @@
 > on the vault or the commit graph proving it. This is the same ordering class A24 records as not
 > git-provable; per A24's process note, future pre-registrations are committed standalone, before
 > any acquisition, so the order is git-evident.
+
+---
+
+### A28 — Refuse behavior corrected: a refusal produces no ranking (supersedes A27's caveated-ranking clause)
+
+- **Context.** A27 ratified refuse-with-reason (Option A) for incised terrain and stated its output
+  form as *"returns the still-valid within-fire ranking as a caveated result"* — the First-Principles
+  framing that the ranking never required a mountain front, only the outlet-anchoring does, so "the
+  ranking stands, anchoring caveated." The implementing build (P3.4 build-1/2) shipped the opposite:
+  a refusal writes only `refusal.json` (no `ranking.csv` / `basins.geojson`) and the refusal message
+  states *"no ranking is produced."* The recorded decision and the shipped, adversarially-reviewed
+  behavior diverged; commit F transcribed A27's caveated-ranking wording verbatim, so the
+  contradiction now lives in the repo.
+- **Decision.** Ratify the shipped behavior and supersede A27's caveated-ranking clause. **On REFUSE
+  the tool produces no ranking** — it emits only the refusal artifact (`refusal.json`) carrying the
+  geomorphic reason (mode count, measured span, bins) and a plain-language message. No `ranking.csv`,
+  no `basins.geojson`, no ordered output of any kind on a refused fire.
+- **Reasoning.** A27's caveated-ranking rested on a First-Principles premise — *the ranking is
+  independent of the mountain front; only the outlet-anchoring needs it* — that subsequent
+  incised-terrain analysis (South Fork, Trout Fire) **refuted**. On incised upland the ranking is not
+  merely un-anchored, it is **meaningless**, because each of the formula's three terms loses its
+  referent: `contributing_area_km²` has no meaning without a discrete basin outlet (there is no
+  depositional plain for an outlet to sit on); `mean_slope` stops discriminating because all
+  dissected-highland terrain is uniformly steep, so the term no longer separates basins; and there is
+  no plain-referenced discharge point to define the ranking unit at all. "Ranking stands, anchoring
+  caveated" was therefore wrong — the ranking does not stand. The honest output past the boundary is
+  a refusal with a reason, not a hedged ordering that invites a meaningless ranking to be acted on.
+- **Status.** ADOPTED 2026-06-30. Supersedes A27's refuse-behavior clause (the Option A
+  caveated-ranking form); A27's text is retained for audit (append-only, not rewritten). **No code
+  change** — the implementation already conforms; A28 aligns the record to the shipped, reviewed
+  behavior. A27's caveated-ranking was council-resolved; this correction rests on the refuted
+  First-Principles premise (terrain analysis that emerged after the council), recorded as a
+  superseding decision rather than a re-litigation. Distinct from the A21 frozen-value correction-test
+  (which governs category-2 constants before any score exists); refuse behavior is neither a frozen
+  value nor pre-score, so A21's test does not apply — this is an ordinary superseding ADR.
+
+---
+
+### A29 — dNBR-select guard: fail loud until the dNBR arm is wired (guard, not a fence change)
+
+- **Context.** The dNBR end-to-end arm (`reproject_dnbr` + `normalize_dnbr_arm_a/b` +
+  `ingest_dnbr_both_arms`) is built and unit-tested but **NOT wired into the scoring path**. Without
+  a stop, a partial-SBS fire would stamp `burn_source="dNBR"` while `_burn_weight_raster` scores the
+  SBS raster (out-of-codeset cells silently weighted 0) — a silent mislabel.
+- **Decision.** `ingest_burn` fails loud (`GateAbort`) when `select_burn_source` returns anything
+  other than `"SBS"`. This converts the silent mislabel to a loud refusal.
+- **Reasoning.** Consistent with A8 fail-loud and A3 precedence (whose dNBR arm is decided but
+  unwired). No category-two fence value changes. No behavior change for Montecito (selects SBS) or
+  South Fork (refuses at A27 before `ingest_burn`).
+- **Status.** Guard in place; no fence value changes. Full dNBR dispatch is **P2.2c**, gated on the
+  A/B arm-selection decision (deferred).
