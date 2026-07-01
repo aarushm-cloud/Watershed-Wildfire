@@ -97,22 +97,38 @@ OUT  = ROOT / "out"
 DEM_TIF, SBS_TIF = DATA / "dem.tif", DATA / "sbs.tif"
 ASSETS_GJ, CREEKS_GJ = DATA / "assets.geojson", DATA / "creeks.geojson"
 
+# A30: per-fire I/O + provenance surface ONLY -- input paths, out_dir, the expected zone CRS, and the
+# validation_case stamp. It carries NO analytical value: every frozen scalar (CONTOUR_M, ACC_THRESHOLD_CELLS,
+# MIN_BASIN_KM2, DRAINS_TO_ASSET_M, TRUTH_MATCH_M, BURN_WEIGHTS, DNBR_*, DIRMAP, CELL_M) stays global in
+# src/config.py, imported exactly as today. MONTECITO_FIRE == the path/CRS globals above, so it is BOTH
+# run_pipeline()'s no-arg default (keeps the behavior lock byte-identical) and run.py's "montecito" entry.
+MONTECITO_FIRE = {
+    "name": "montecito",
+    "dem": DEM_TIF, "sbs": SBS_TIF, "assets": ASSETS_GJ, "creeks": CREEKS_GJ,
+    "out_dir": OUT, "expected_crs": CANONICAL_CRS,
+    "validation_case": "Thomas_Fire_2017/Montecito_2018",
+}
+
 
 # ---------------------------------------------------------------------------
 # 2a -- hydrology + master-outlet linchpin (FM-1)
 # ---------------------------------------------------------------------------
-def stage_2a_hydrology():
-    """Condition the DEM and derive D8 flow direction + accumulation (pysheds)."""
-    with rasterio.open(DEM_TIF) as dsrc, rasterio.open(SBS_TIF) as ssrc:
-        # DEM/SBS alignment (CRS == canonical, equal shape, equal affine) -- src/grids.assert_aligned
-        # (extracted verbatim, P2.2a). The DEM-RESOLUTION check is a single-layer property, not a
-        # pairwise alignment check, so it stays here.
-        assert_aligned(dsrc.profile, ssrc.profile)
+def stage_2a_hydrology(fire):
+    """Condition the DEM and derive D8 flow direction + accumulation (pysheds).
+
+    fire -- the per-fire I/O dict (A30): reads fire["dem"] / fire["sbs"] and validates against
+    fire["expected_crs"]. CELL_M resolution check, DIRMAP, and the master-outlet block stay global/frozen.
+    """
+    with rasterio.open(fire["dem"]) as dsrc, rasterio.open(fire["sbs"]) as ssrc:
+        # DEM/SBS alignment (CRS == expected zone, equal shape, equal affine) -- src/grids.assert_aligned
+        # (extracted verbatim, P2.2a). expected_crs threaded per-fire (A30/A25); the DEM-RESOLUTION check
+        # is a single-layer property, not a pairwise alignment check, so it stays here.
+        assert_aligned(dsrc.profile, ssrc.profile, expected_crs=fire["expected_crs"])
         transform = dsrc.transform
         if abs(transform.a - CELL_M) > 1e-6 or abs(transform.e + CELL_M) > 1e-6:
             raise GateAbort(f"DEM resolution {(transform.a, transform.e)} != {CELL_M} m.")
 
-    grid, dem, dem_raw = load_dem(DEM_TIF)   # pysheds Grid + Raster + raw float64 elev (m); src/ingest.py
+    grid, dem, dem_raw = load_dem(fire["dem"])   # pysheds Grid + Raster + raw float64 elev (m); src/ingest.py
     dem_nodata = dem.nodata                   # nodata sentinel (pysheds defaults undeclared -> 0, FM-12);
     #                                           threaded to the A25 CONTOUR_M guard so 0-fill isn't terrain.
 
@@ -324,9 +340,15 @@ def dispatch_result(result):
 # ---------------------------------------------------------------------------
 # pipeline driver (2a -> 2f) + determinism + perturbation
 # ---------------------------------------------------------------------------
-def run_pipeline():
-    """Run 2a -> 2f at the frozen TRUTH_MATCH_M. Returns a results dict."""
-    hydro = stage_2a_hydrology()
+def run_pipeline(fire=None):
+    """Run 2a -> 2f at the frozen TRUTH_MATCH_M. Returns a results dict.
+
+    fire -- per-fire I/O + provenance dict (A30). None -> MONTECITO_FIRE, so the no-arg call is
+    byte-identical to before (behavior lock). Only I/O + provenance is per-fire; every analytical
+    scalar stays global/frozen in src/config.py.
+    """
+    fire = fire if fire is not None else MONTECITO_FIRE
+    hydro = stage_2a_hydrology(fire)
     zone = classify_master_zone(hydro["master_km2"])
     if zone == "ABORT":
         raise GateAbort(f"Master outlet {hydro['master_km2']:.2f} km^2 in ABORT zone (FM-1).")
@@ -336,7 +358,7 @@ def run_pipeline():
     # is ill-posed; emit an honest refusal (refusal.json) and return early instead of crashing on
     # A25's downstream CONTOUR_M-out-of-range symptom. Montecito is range-front (span ~15 m) -> None
     # -> falls through to A25 unchanged. out_dir = OUT, the same dir main()'s success path writes to.
-    refusal = _terrain_applicability_gate(hydro["dem_raw"], hydro["dem_nodata"], OUT)
+    refusal = _terrain_applicability_gate(hydro["dem_raw"], hydro["dem_nodata"], fire["out_dir"])
     if refusal is not None:
         return refusal     # polymorphic: the refusal-result, NOT the ranked dict (caller dispatches on status)
 
@@ -346,18 +368,18 @@ def run_pipeline():
     assert_contour_in_dem_range(hydro["dem_raw"], hydro["dem_nodata"])
     # unpack hydro at the call site (dict-key coupling stays in gate, not in delineate); src/delineate.py
     outlets = stage_2b_outlets(hydro["acc"], hydro["fdir"], hydro["dem_raw"], hydro["shape"])
-    assets = load_assets(ASSETS_GJ)          # GeoDataFrame; src/ingest.py
+    assets = load_assets(fire["assets"])     # GeoDataFrame; src/ingest.py
     _assert_metric_crs(assets.crs, "assets.geojson")
     asset_xy = np.column_stack([assets.geometry.x.values, assets.geometry.y.values])
     basins = stage_2c_delineate(hydro["grid"], hydro["acc"], hydro["fdir_raster"],
                                 hydro["transform"], hydro["shape"], outlets, asset_xy)
 
     # A15 seam: select source + remap to weights + A18 coverage + single provenance; src/ingest.py
-    wt, covered, provenance = ingest_burn(SBS_TIF)
+    wt, covered, provenance = ingest_burn(fire["sbs"])
     slope = mean_slope_tan(hydro["dem_raw"])       # per-cell tan(theta) slope raster (2d, stays in gate)
     ranked, n_ties = stage_2e_score(wt, covered, slope, basins)   # frozen burn x slope x area; src/score.py
 
-    creeks = load_creeks(CREEKS_GJ)          # GeoDataFrame; src/ingest.py
+    creeks = load_creeks(fire["creeks"])     # GeoDataFrame; src/ingest.py
     _assert_metric_crs(creeks.crs, "creeks.geojson")
     if not creeks.geometry.is_valid.all():
         raise GateAbort("Invalid creek geometry -- FM-10 (geometry abort, not a match miss).")

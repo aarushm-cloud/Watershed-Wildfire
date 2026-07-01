@@ -102,13 +102,16 @@ def write_refusal(verdict, out_dir):
     return refusal_path
 
 
-def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source):
+def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source,
+                  validation_case="Thomas_Fire_2017/Montecito_2018"):
     """Write {out_dir}/{ranking.csv, basins.geojson}, stamped burn_source + screening (A4/A11).
 
     Args (explicit, from gate's call site): basins -- scored basins (rank/score/decomposition/mask/
     flowed/matched_creek); creek_nearest -- per-creek nearest-outlet info; out_dir -- output dir path
     (gate-owned); dem_tif -- DEM path for the transform re-open; burn_source -- provenance string
-    (read-only, from ingest via gate). SCREENING_STATEMENT is this module's constant."""
+    (read-only, from ingest via gate); validation_case -- per-fire provenance stamp (A30), defaulting
+    to the Montecito case so the no-kwarg call is byte-identical. SCREENING_STATEMENT is this module's
+    constant."""
     out_dir.mkdir(parents=True, exist_ok=True)
     nearest_by_basin = {}
     for creek, info in creek_nearest.items():
@@ -131,7 +134,7 @@ def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source):
     csv_path = out_dir / "ranking.csv"
     with open(csv_path, "w") as fh:
         fh.write(f"# {SCREENING_STATEMENT}\n")
-        fh.write(f"# burn_source={burn_source}  validation_case=Thomas_Fire_2017/Montecito_2018\n")
+        fh.write(f"# burn_source={burn_source}  validation_case={validation_case}\n")
         df.to_csv(fh, index=False)
 
     # basins.geojson: vectorise each basin mask, reproject to EPSG:4326 (GeoJSON convention)
@@ -159,7 +162,7 @@ def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source):
     with open(gj_path) as fh:
         fc = json.load(fh)
     fc["provenance"] = {"burn_source": burn_source, "screening": SCREENING_STATEMENT,
-                        "validation_case": "Thomas_Fire_2017/Montecito_2018", "crs": "EPSG:4326"}
+                        "validation_case": validation_case, "crs": "EPSG:4326"}
     with open(gj_path, "w") as fh:
         json.dump(fc, fh)
     return csv_path, gj_path, df
