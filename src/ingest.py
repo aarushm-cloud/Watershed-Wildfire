@@ -5,8 +5,10 @@ single burn-source provenance. See ARCHITECTURE.md and DECISIONS A2/A3/A4/A8/A15
 P2.2a SCOPE (behavior-preserving): realises the A15 ingest seam. Burn-source SELECTION (A3
 precedence), the class->weight remap + A18 coverage mask (moved here VERBATIM from score.py), and
 the single Provenance stamp now live in this one file -- so adding the dNBR arm (P2.2b) is a change
-INSIDE this file, not surgery across the pipeline. SBS-only: the dNBR branch is present but inert
-(raises NotImplementedError("dNBR arm: P2.2b")). Outputs are bit-identical (Montecito SBS covers
+INSIDE this file, not surgery across the pipeline. The dNBR arm functions (reproject_dnbr,
+normalize_dnbr_arm_a/b, ingest_dnbr_both_arms) are IMPLEMENTED and unit-tested but NOT wired into
+ingest_burn; ingest_burn now FAILS LOUD on a non-SBS selection (A29) rather than mislabelling --
+full end-to-end dNBR dispatch is P2.2c. Outputs are bit-identical (Montecito SBS covers
 the AOI -> resolves to SBS; new code path, identical values). Deliberately NOT here: the DEM/SBS
 alignment check (stays at gate.stage_2a's call site, now via grids.assert_aligned) and the
 per-basin mean_burn reduction (stays in score.py -- it needs the delineated basins, which do not
@@ -93,7 +95,9 @@ def load_creeks(path):
 # ---------------------------------------------------------------------------
 def select_burn_source(sbs: np.ndarray) -> str:
     """A3/A15 precedence: SBS if it covers the WHOLE AOI, else dNBR for the whole AOI (never
-    blended). SBS-only for now; the dNBR branch is inert until P2.2b.
+    blended). This selector DOES return "dNBR" for a partial-SBS AOI; it is ingest_burn that guards
+    that return and fails loud (A29), because the dNBR arm is built and unit-tested but not yet wired
+    into the ingest_burn seam (P2.2c).
 
     AOI = the analysis grid. The DEM/SBS alignment check (grids.assert_aligned, run UPSTREAM in
     gate.stage_2a) guarantees the SBS raster shares the DEM grid cell-for-cell, so "SBS valid-data
@@ -129,7 +133,8 @@ def _burn_weight_raster(sbs: np.ndarray):
 
 def ingest_burn(burn_path):
     """A15 seam: select the one burn source, load it, remap to per-cell weights + coverage mask,
-    and emit the single burn-source provenance (A4). SBS-only (the dNBR arm is inert, P2.2b).
+    and emit the single burn-source provenance (A4). FAILS LOUD (A29) on a non-SBS selection: the
+    dNBR arm functions are built and unit-tested but not yet wired into this seam (P2.2c).
 
     Returns (wt, covered, provenance):
       wt         -- per-cell burn weight raster [0-1, dimensionless], float64 (A17)
@@ -138,6 +143,17 @@ def ingest_burn(burn_path):
     The per-basin mean_burn reduction stays in score.py (it needs the delineated basins)."""
     sbs = load_burn(burn_path)               # raw SBS class raster (band 1)
     burn_source = select_burn_source(sbs)    # A3 precedence -> "SBS" for Montecito (or "dNBR" if partial)
+    if burn_source != "SBS":
+        # A29 fail-loud: the dNBR end-to-end arm (reproject_dnbr + normalize_dnbr_arm_a/b +
+        # ingest_dnbr_both_arms) is built and unit-tested but NOT wired into this seam (P2.2c). Without
+        # this stop, _burn_weight_raster(sbs) below would silently score the SBS raster (out-of-codeset
+        # cells weighted 0.0) under a non-SBS provenance stamp -- a silent mislabel. Refuse instead.
+        raise GateAbort(
+            f"ingest_burn: burn-source selection returned {burn_source!r}, but the dNBR end-to-end "
+            "arm is built and unit-tested yet NOT wired into ingest_burn (P2.2c pending). Refusing to "
+            f"stamp {burn_source!r} provenance while scoring SBS-derived weights. Wire the dNBR "
+            "dispatch (ingest_dnbr_both_arms) before running a fire without full SBS coverage."
+        )
     wt, covered = _burn_weight_raster(sbs)   # A17 weights + A18 coverage, computed once at ingest
     provenance = {"burn_source": burn_source}  # A4/A19: single loose-dict stamp, read everywhere
     return wt, covered, provenance

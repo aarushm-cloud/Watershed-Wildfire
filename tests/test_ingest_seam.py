@@ -26,13 +26,17 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
+import rasterio
+from rasterio.transform import from_origin
 
 # repo root on sys.path so `from src...` resolves no matter where this is invoked
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from src.ingest import select_burn_source, SBS_CODESET
+from src.ingest import select_burn_source, ingest_burn, SBS_CODESET
+from src.grids import GateAbort
 
 
 def test_sbs_selected_when_codeset_covers_aoi():
@@ -64,12 +68,46 @@ def test_dnbr_arm_resolves_when_sbs_partial():
         "partial-SBS must resolve to 'dNBR' (the P2.2b arm); it no longer raises")
 
 
+def _write_sbs(path, arr):
+    """Tiny single-band uint8 SBS GeoTIFF (values per the SBS codeset / BURN_WEIGHTS encoding)."""
+    a = np.asarray(arr, dtype="uint8")
+    h, w = a.shape
+    with rasterio.open(path, "w", driver="GTiff", height=h, width=w, count=1, dtype="uint8",
+                       crs="EPSG:32611", transform=from_origin(0.0, 0.0, 10.0, 10.0)) as d:
+        d.write(a, 1)
+
+
+def test_ingest_burn_fails_loud_on_dnbr_selection(tmp_path):
+    """A29: partial-SBS -> select_burn_source returns 'dNBR' -> ingest_burn RAISES (arm built, not
+    wired) instead of stamping 'dNBR' while scoring SBS weights."""
+    sbs = np.full((4, 4), 3, dtype="uint8")
+    sbs[0, 0] = 200                      # out-of-codeset -> partial coverage -> 'dNBR' selection
+    assert 200 not in SBS_CODESET        # guard: the fixture really is out-of-codeset
+    p = tmp_path / "sbs_partial.tif"
+    _write_sbs(p, sbs)
+    with pytest.raises(GateAbort, match="dNBR"):
+        ingest_burn(str(p))
+
+
+def test_ingest_burn_succeeds_on_full_sbs(tmp_path):
+    """NEGATIVE CONTROL (non-vacuous): an all-in-codeset SBS raster -> ingest_burn returns normally
+    with burn_source 'SBS'. Proves the A29 guard does not over-fire on the real SBS path."""
+    sbs = np.array([[0, 1, 2, 3], [4, 15, 1, 2], [3, 4, 0, 15], [1, 2, 3, 4]], dtype="uint8")
+    p = tmp_path / "sbs_full.tif"
+    _write_sbs(p, sbs)
+    wt, covered, provenance = ingest_burn(str(p))
+    assert provenance["burn_source"] == "SBS"
+    assert wt.shape == sbs.shape and covered.shape == sbs.shape
+
+
 # ---------------------------------------------------------------------------
 # Standalone runner (no pytest required): python tests/test_ingest_seam.py
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    import inspect
     tests = [v for k, v in sorted(globals().items())
-             if k.startswith("test_") and callable(v)]
+             if k.startswith("test_") and callable(v)
+             and "tmp_path" not in inspect.signature(v).parameters]  # pytest-fixture tests: pytest only
     failed = 0
     for t in tests:
         try:
@@ -78,5 +116,6 @@ if __name__ == "__main__":
         except AssertionError as exc:
             failed += 1
             print(f"FAIL  {t.__name__}\n      {exc}")
-    print(f"\n{len(tests) - failed}/{len(tests)} seam tests passed.")
+    print(f"\n{len(tests) - failed}/{len(tests)} seam tests passed "
+          "(fixture-requiring tests skipped in standalone mode; run via pytest for those).")
     sys.exit(1 if failed else 0)
