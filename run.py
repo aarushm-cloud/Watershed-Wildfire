@@ -4,7 +4,7 @@ and writes to out/<fire>/. The only place stage order is hardcoded; a thin
 script, not a module (no orchestrator -- DECISIONS A7). See ARCHITECTURE.md.
 
 A30: run.py is the production driver over the per-fire I/O config. The pipeline itself
-(run_pipeline + the stage order + the A27 refusal dispatch) lives in validation/gate.py and is
+(run_pipeline + the stage order + the A27 refusal dispatch) lives in src/pipeline.py and is
 NOT moved here (A7: run.py holds no inter-stage state and makes no analytical decision -- it only
 resolves a fire name to its I/O dict, calls the pipeline, dispatches the polymorphic result, and
 writes outputs on the ranked path). argparse + execution live inside main()/run_fire so `import run`
@@ -13,25 +13,19 @@ has NO side effects (a bare import must never parse args or run the pipeline).
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import sys
 from pathlib import Path
 
-# Load validation/gate.py as an importable module via its file path -- the same cwd-independent
-# pattern the tests use (validation/ is not a package; gate.py anchors its own DATA/OUT paths to
-# __file__). run_pipeline / dispatch_result / MONTECITO_FIRE come from this single module.
+# Make the project root importable so `from src...` resolves whether run.py is executed as a script
+# (python run.py) or imported by a test. run.py lives at <root>/run.py.
 _REPO_ROOT = Path(__file__).resolve().parent
-_GATE_PATH = _REPO_ROOT / "validation" / "gate.py"
-_spec = importlib.util.spec_from_file_location("gate", _GATE_PATH)
-gate = importlib.util.module_from_spec(_spec)
-sys.modules["gate"] = gate
-_spec.loader.exec_module(gate)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-run_pipeline = gate.run_pipeline
-dispatch_result = gate.dispatch_result
-MONTECITO_FIRE = gate.MONTECITO_FIRE
-SOUTHFORK_FIRE = gate.SOUTHFORK_FIRE
-
+# The pipeline (run_pipeline + the stage order + the A27 refusal dispatch + the per-fire configs) was
+# promoted verbatim into src/pipeline.py (behavior-neutral); run.py imports it directly from there now
+# instead of loading validation/gate.py by file path. write_outputs is the DAG sink (src/outputs.py).
+from src.pipeline import run_pipeline, dispatch_result, MONTECITO_FIRE, SOUTHFORK_FIRE
 from src.outputs import write_outputs
 
 # Registry of runnable fires. Add production fires here (data/<fire>/ paths + expected_crs +

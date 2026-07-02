@@ -118,7 +118,9 @@ def test_expected_crs_threaded_into_assert_aligned(tmp_path, monkeypatch):
         captured["expected_crs"] = kwargs.get("expected_crs")
         raise _Sentinel()
 
-    monkeypatch.setattr(gate, "assert_aligned", _recorder)
+    # stage_2a_hydrology was promoted into src/pipeline.py, so it resolves `assert_aligned` in THAT
+    # module's namespace -- patch it there (gate.stage_2a_hydrology is the same object via the shim).
+    monkeypatch.setattr("src.pipeline.assert_aligned", _recorder)
     with pytest.raises(_Sentinel):
         gate.stage_2a_hydrology(fire)
     assert captured.get("expected_crs") == "EPSG:32613"
