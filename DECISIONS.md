@@ -179,3 +179,90 @@
   South Fork (refuses at A27 before `ingest_burn`).
 - **Status.** Guard in place; no fence value changes. Full dNBR dispatch is **P2.2c**, gated on the
   A/B arm-selection decision (deferred).
+
+---
+
+### A30 — Per-fire I/O parameterization: `run_pipeline(fire=None)` threads a fire config; Montecito default byte-identical (architecture, behavior-preserving)
+
+- **Context.** The pipeline was still Montecito-bound: `run_pipeline` took no arguments and read
+  I/O + provenance straight from module globals, and `run.py` (the intended production driver) was
+  an empty stub. Two consequences surfaced in the P3.4-close read-through: no second fire can run
+  through the production entrypoint without editing globals; and a latent provenance mislabel —
+  `write_outputs` stamped the Montecito `validation_case` string on *any* output, so a non-Montecito
+  run would carry Montecito provenance.
+- **Decision.** Parameterize per-fire I/O. `run_pipeline(fire=None)` threads a fire config carrying
+  **only I/O + provenance** — `name, dem, sbs, assets, creeks, out_dir, expected_crs,
+  validation_case`; the no-arg default is `MONTECITO_FIRE` (== the existing module globals), so
+  Montecito output is **byte-identical** and the behavior lock is untouched. `validation_case`
+  becomes **per-fire** (parameterized in `write_outputs`, defaulted to the Montecito string), fixing
+  the latent mislabel. `run.py` becomes the production driver (thin `--fire` CLI, lean output);
+  `gate.main` stays the Montecito validation driver (probes, report-values); both share
+  `run_pipeline` / `dispatch_result` / `write_outputs`. Does **NOT** change pipeline stage order.
+- **Scope boundary.** The frozen analytical scalars — `CONTOUR_M, ACC_THRESHOLD_CELLS,
+  MIN_BASIN_KM2, DRAINS_TO_ASSET_M, TRUTH_MATCH_M, BURN_WEIGHTS, DNBR_*, DIRMAP, D8_OFFSETS,
+  CELL_M` — remain **global/frozen**, NOT per-fire in this change. Per-fire tuning of any of them
+  (e.g. a fire needing `CONTOUR_M ≠ 150`) affects outlets → ranking and is a **separate
+  pre-registered decision** (A26 cat-1/cat-2 split; D0). This change threads I/O and provenance only.
+- **Reasoning.** A behavior-preserving generalization in the A25 mold — additive, default-preserving,
+  regression-gated. The no-arg default collapsing to the existing globals is what keeps Montecito
+  byte-identical, so the behavior lock stays a true regression detector (A19). Fixing `validation_case`
+  in the same pass closes a provenance-integrity hole — a mislabeled output is the silent-wrong-
+  provenance failure the fail-loud spine exists to prevent (A8/A11) — without touching any scored
+  value. Keeping the analytical fence global honors A26 (only I/O generalizes now) and D0 (no
+  per-fire scalar without a validated trigger).
+- **Status.** ADOPTED (build-2a). By construction Montecito output is byte-identical (no-arg default
+  == existing globals) and the behavior lock is untouched; no category-two value moves; stage order
+  unchanged. Ratify-first: the repo `DECISIONS.md` stub commits before the build-2a code commit.
+
+  ### A31 — Terrain-applicability gate runs before hydrology and burn ingest (pipeline reorder)
+
+**Status:** Accepted (pre-registered; ratify-first — this stub is committed BEFORE the implementing code).
+**Scope:** Pipeline stage ordering + per-fire I/O wiring. No analytical change. Frozen category-two fence untouched; frozen scalars stay global.
+
+**Context.**
+`assess_hypsometric_applicability` (the A27 terrain check) is invoked in `run_pipeline` via `_terrain_applicability_gate`, and it consumes `dem_raw`/`dem_nodata` that are currently produced *inside* `stage_2a_hydrology`. `stage_2a` opens and `assert_aligned`s the SBS raster together with the DEM before `run_pipeline` reaches the gate. Current `run_pipeline` order:
+
+1. `stage_2a_hydrology` — opens+aligns DEM & SBS, runs hydrology, computes master outlet
+2. master-outlet ABORT (FM-1)
+3. A27 terrain-applicability refusal
+4. A25 contour-in-range guard
+
+Consequence: an un-assessed incised fire with no SBS cannot reach an honest A27 refusal through the pipeline. South Fork (the P3 dNBR-path fire) has **no SBS raster** — its burn products are entirely dNBR-derived. Routing it through `run_pipeline` today would fail at `rasterio.open(fire["sbs"])` inside `stage_2a` (missing SBS / no `sbs` field), not at the terrain gate. This is why South Fork's refusal is presently exercised only by calling `assess_hypsometric_applicability` directly on its DEM (`test_B_southfork_corroboration`), bypassing the pipeline.
+
+**Decision.**
+Move the A27 terrain-applicability gate ahead of `stage_2a_hydrology` in `run_pipeline`, so refusal is decided on the DEM alone before any hydrology runs or any SBS/burn raster is opened.
+
+- DEM load is lifted ahead of both the gate and `stage_2a` (standalone `load_dem(fire["dem"])` at the top of `run_pipeline`, or DEM-load split out of `stage_2a`). The gate receives `dem_raw`/`dem_nodata` from this early load.
+- On refusal, `run_pipeline` returns the refusal (writes `refusal.json` to `fire["out_dir"]`) without opening SBS, running hydrology, or evaluating the master-outlet ABORT.
+- `stage_2a_hydrology` runs only for fires that pass the terrain gate; it retains its open+align-SBS-with-DEM contract for those fires.
+
+New `run_pipeline` order:
+
+1. DEM load (`fire["dem"]`)
+2. A27 terrain-applicability refusal ← **now first; refuses on DEM alone**
+3. `stage_2a_hydrology` — opens+aligns SBS, hydrology, master outlet
+4. master-outlet ABORT (FM-1)
+5. A25 contour-in-range guard
+
+**This subsumes the prior "master-outlet-ABORT-runs-before-A27" finding:** the terrain gate now precedes both hydrology and the ABORT, so no hydrology work is done for a fire that will refuse on terrain.
+
+**South Fork wiring.**
+- A `southfork` fire dict is added and registered in `FIRES`, with no valid SBS (`sbs` = `None`/absent). Because the terrain gate now runs before SBS is opened, `--fire southfork` runs end-to-end to a refusal and emits `refusal.json` on machines where the (gitignored) South Fork data is present. This is the real-fire *demonstration* of the refusal path; the fixture test below is the *guarantee*.
+- The registered `southfork` fire is **not a CI dependency** — its data is gitignored and unavailable on a clean checkout.
+- **Clean-exit sub-decision:** a registered fire whose local data is absent must exit cleanly. `resolve_fire`/`run.py` checks input existence and raises `SystemExit` with a data-absence message (e.g. `"southfork data not present (gitignored); see acquisition_manifest.json"`) rather than crashing deep in `rasterio.open`/`load_dem`. "Registered but data-absent" is thus a defined, graceful state, not a broken one. This check is generic (applies to any registered fire), not South-Fork-special-cased.
+
+**Test plan.**
+- **Hermetic end-to-end refusal (the guarantee):** a new test drives `run_pipeline` with a fire dict pointing at the tracked `tests/fixtures/incised_synthetic.tif` (EPSG:32613, 40×80, 10 m) and `sbs=None`, asserts a refusal is returned / `refusal.json` written, and — critically — is **non-vacuous**: it fails if the reorder is reverted (i.e. if the pipeline attempts SBS-open before the gate, or does hydrology before refusing). This also dynamically exercises the `assets`/`creeks`/`out_dir` threading through `run_pipeline` that was previously proven only by grep.
+- **Path-threading (bad-path, not parity):** a fire dict with a nonexistent `dem` (and/or `sbs`) must cause `run_pipeline` to raise. This proves config threading — explicitly NOT the false-coverage `run_pipeline()` vs `run_pipeline(MONTECITO_FIRE)` determinism comparison.
+- **Clean-exit on absent data:** a test invokes `resolve_fire`/`run_fire` for a registered fire pointing at a nonexistent input path and asserts a `SystemExit` with the data-absence message — distinguishing a graceful "data not present" exit from a raw `rasterio`/`load_dem` crash. (The bad-path threading test above covers `run_pipeline` raising on a bad path; this covers the driver layer exiting cleanly.)
+- **Existing South Fork corroboration** (`test_B_southfork_corroboration`) is retained unchanged (skip-when-absent), now complemented by the hermetic pipeline test.
+
+**Hard gates (unchanged).**
+- Montecito **byte-identical** — behavior lock is the oracle. Montecito proceeds through A27 (passes terrain), so the reorder must not change its output. `test_behavior_lock.py` is never edited to make this pass.
+- `git diff src/config.py` empty.
+- Frozen seam (`delineate` / `score` / `hydrology` / `grids` / `ingest`) untouched.
+- Frozen analytical scalars (`CONTOUR_M, ACC_THRESHOLD_CELLS, MIN_BASIN_KM2, DRAINS_TO_ASSET_M, TRUTH_MATCH_M, CELL_M`) stay global — no per-fire tuning (that is a separate pre-registered decision).
+
+**Non-goals / defer.**
+- No dNBR wiring. The A29 fail-loud on non-SBS burn selection stands; full dNBR end-to-end dispatch is P2.2c (council-gated).
+- No promotion of `run_pipeline` out of `validation/gate.py` (deferred nit).
