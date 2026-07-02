@@ -109,28 +109,81 @@ MONTECITO_FIRE = {
     "validation_case": "Thomas_Fire_2017/Montecito_2018",
 }
 
+# A31: South Fork Fire 2024 (Colorado, UTM 13N / EPSG:32613) -- the P3 incised-terrain DEMONSTRATION of
+# the A27 refusal path THROUGH the pipeline. Its burn products are dNBR-only, so sbs=None BY DESIGN
+# (never a missing-file error -- see run._assert_inputs_present); the terrain gate now refuses on the
+# DEM alone before any SBS is opened (A31), so --fire southfork runs end-to-end to a refusal.json where
+# the (gitignored) data is present. creeks=None: South Fork has no tool-format truth-creek layer AND it
+# refuses before creeks are ever loaded. Data lives at repo-root data/southfork/ (NOT validation/data/),
+# so paths anchor off _REPO_ROOT. NOT a CI dependency (data gitignored, absent on a clean checkout).
+_SOUTHFORK_DATA = _REPO_ROOT / "data" / "southfork"
+SOUTHFORK_FIRE = {
+    "name": "southfork",
+    "dem": _SOUTHFORK_DATA / "dem" / "dem.tif",
+    "sbs": None,                                    # dNBR-only fire; no SBS by design (A31, A29)
+    "assets": _SOUTHFORK_DATA / "assets" / "osm_buildings_32613.gpkg",
+    "creeks": None,                                 # no tool-format creek layer; refuses before creeks load
+    "out_dir": OUT / "southfork",
+    "expected_crs": "EPSG:32613",
+    "validation_case": "South_Fork_Fire_2024",
+}
+
+
+# ---------------------------------------------------------------------------
+# A31: DEM load, lifted OUT of stage_2a so the A27 terrain gate can refuse on the DEM ALONE (before any
+# SBS is opened or hydrology runs). run_pipeline reads the DEM here ONCE and threads the artifacts into
+# both the terrain gate and stage_2a_hydrology (DECISIONS A31).
+# ---------------------------------------------------------------------------
+def _load_dem_artifacts(fire):
+    """Read the DEM ONCE and return every artifact a downstream DEM consumer needs (A31).
+
+    The DEM read that used to live inside stage_2a_hydrology is lifted here so run_pipeline can run the
+    A27 terrain-applicability gate on the raw DEM BEFORE opening SBS or running hydrology. The read is
+    byte-for-byte the same as before -- the rasterio profile/transform (for assert_aligned + the CELL_M
+    check) plus load_dem's pysheds Grid / Raster / raw float64 elevation (m).
+
+    fire -- per-fire I/O dict (A30); reads fire["dem"] only. Returns a bundle:
+      grid, dem, dem_raw -- from src.ingest.load_dem (pysheds Grid + Raster + raw elev, m)
+      dem_nodata         -- dem.nodata sentinel (pysheds defaults undeclared -> 0, FM-12)
+      profile            -- DEM rasterio profile (assert_aligned reads crs/height/width/transform)
+      transform          -- DEM affine (m); threaded downstream (delineate, creek match)
+    """
+    with rasterio.open(fire["dem"]) as dsrc:
+        dem_profile = dsrc.profile          # DEM/SBS alignment (assert_aligned); dict, still valid after close
+        dem_transform = dsrc.transform      # DEM affine (m); downstream transform of record
+    grid, dem, dem_raw = load_dem(fire["dem"])   # pysheds Grid + Raster + raw float64 elev (m); src/ingest.py
+    return {"grid": grid, "dem": dem, "dem_raw": dem_raw, "dem_nodata": dem.nodata,
+            "profile": dem_profile, "transform": dem_transform}
+
 
 # ---------------------------------------------------------------------------
 # 2a -- hydrology + master-outlet linchpin (FM-1)
 # ---------------------------------------------------------------------------
-def stage_2a_hydrology(fire):
+def stage_2a_hydrology(fire, dem_artifacts=None):
     """Condition the DEM and derive D8 flow direction + accumulation (pysheds).
 
-    fire -- the per-fire I/O dict (A30): reads fire["dem"] / fire["sbs"] and validates against
-    fire["expected_crs"]. CELL_M resolution check, DIRMAP, and the master-outlet block stay global/frozen.
+    A31: the DEM is now loaded ONCE upstream (run_pipeline -> _load_dem_artifacts) and passed in via
+    dem_artifacts, so this stage opens ONLY the SBS. dem_artifacts=None is a direct-caller fallback
+    (it self-loads the DEM); run_pipeline ALWAYS passes the artifacts, so the pipeline opens the DEM
+    exactly once and the A27 terrain gate runs before any SBS/hydrology work.
+
+    fire          -- per-fire I/O dict (A30): reads fire["sbs"], validates against fire["expected_crs"].
+    dem_artifacts -- the _load_dem_artifacts bundle (grid/dem/dem_raw/dem_nodata/profile/transform).
+    CELL_M resolution check, DIRMAP, and the master-outlet block stay global/frozen.
     """
-    with rasterio.open(fire["dem"]) as dsrc, rasterio.open(fire["sbs"]) as ssrc:
+    if dem_artifacts is None:
+        dem_artifacts = _load_dem_artifacts(fire)   # direct-caller convenience; run_pipeline passes them in
+    grid, dem, dem_raw = dem_artifacts["grid"], dem_artifacts["dem"], dem_artifacts["dem_raw"]
+    dem_nodata, dem_transform = dem_artifacts["dem_nodata"], dem_artifacts["transform"]
+
+    with rasterio.open(fire["sbs"]) as ssrc:
         # DEM/SBS alignment (CRS == expected zone, equal shape, equal affine) -- src/grids.assert_aligned
         # (extracted verbatim, P2.2a). expected_crs threaded per-fire (A30/A25); the DEM-RESOLUTION check
-        # is a single-layer property, not a pairwise alignment check, so it stays here.
-        assert_aligned(dsrc.profile, ssrc.profile, expected_crs=fire["expected_crs"])
-        transform = dsrc.transform
-        if abs(transform.a - CELL_M) > 1e-6 or abs(transform.e + CELL_M) > 1e-6:
-            raise GateAbort(f"DEM resolution {(transform.a, transform.e)} != {CELL_M} m.")
-
-    grid, dem, dem_raw = load_dem(fire["dem"])   # pysheds Grid + Raster + raw float64 elev (m); src/ingest.py
-    dem_nodata = dem.nodata                   # nodata sentinel (pysheds defaults undeclared -> 0, FM-12);
-    #                                           threaded to the A25 CONTOUR_M guard so 0-fill isn't terrain.
+        # is a single-layer property, not a pairwise alignment check, so it stays here. The DEM profile is
+        # the single upstream load (A31); only the SBS is opened here now.
+        assert_aligned(dem_artifacts["profile"], ssrc.profile, expected_crs=fire["expected_crs"])
+        if abs(dem_transform.a - CELL_M) > 1e-6 or abs(dem_transform.e + CELL_M) > 1e-6:
+            raise GateAbort(f"DEM resolution {(dem_transform.a, dem_transform.e)} != {CELL_M} m.")
 
     fdir, acc = run_hydrology(grid, dem)   # 5-step pysheds chain (fdir/acc Rasters); src/hydrology.py
 
@@ -147,7 +200,7 @@ def stage_2a_hydrology(fire):
     master_km2 = int(np.asarray(catch).sum()) * CELL_AREA_KM2
 
     return {"grid": grid, "dem_raw": dem_raw, "dem_nodata": dem_nodata, "fdir_raster": fdir,
-            "fdir": np.asarray(fdir), "acc": acc_arr, "transform": transform,
+            "fdir": np.asarray(fdir), "acc": acc_arr, "transform": dem_transform,
             "shape": shape, "master_rowcol": (int(mrow), int(mcol)),
             "master_acc_cells": int(acc_arr[mrow, mcol]), "master_km2": master_km2}
 
@@ -348,19 +401,29 @@ def run_pipeline(fire=None):
     scalar stays global/frozen in src/config.py.
     """
     fire = fire if fire is not None else MONTECITO_FIRE
-    hydro = stage_2a_hydrology(fire)
+
+    # A31: load the DEM ONCE, up front -- before the terrain gate and before hydrology. Lifting the DEM
+    # read out of stage_2a lets the A27 terrain-applicability gate refuse on the raw DEM ALONE, before
+    # any SBS is opened, any hydrology runs, or the master-outlet ABORT is evaluated (DECISIONS A31).
+    dem_artifacts = _load_dem_artifacts(fire)
+
+    # A27/A31 terrain-applicability refusal (DECISIONS A27 / A27.1 / A31) -- now FIRST, on the raw DEM.
+    # Incised terrain has no mountain-front break, so the CONTOUR_M anchor is ill-posed; emit an honest
+    # refusal.json to fire["out_dir"] and return the refusal-result WITHOUT opening SBS, running
+    # hydrology, or evaluating the master-outlet ABORT. Montecito (range-front, span ~15 m) -> None ->
+    # proceeds. This subsumes the prior "master-outlet-ABORT-before-A27" order (A31): no hydrology work
+    # is done for a fire that will refuse on terrain.
+    refusal = _terrain_applicability_gate(dem_artifacts["dem_raw"], dem_artifacts["dem_nodata"],
+                                          fire["out_dir"])
+    if refusal is not None:
+        return refusal     # polymorphic refusal-result; SBS never opened, no hydrology run (caller dispatches on status)
+
+    # Hydrology + master outlet run ONLY for terrain that passed the gate. stage_2a opens+aligns SBS and
+    # reuses the DEM artifacts loaded above -- the pipeline opens the DEM exactly once (A31).
+    hydro = stage_2a_hydrology(fire, dem_artifacts)
     zone = classify_master_zone(hydro["master_km2"])
     if zone == "ABORT":
         raise GateAbort(f"Master outlet {hydro['master_km2']:.2f} km^2 in ABORT zone (FM-1).")
-
-    # A27 terrain-applicability refusal (DECISIONS A27/A27.1), wired -- runs BEFORE the A25 guard on
-    # the SAME raw pre-fill DEM. Incised terrain has no mountain-front break, so the CONTOUR_M anchor
-    # is ill-posed; emit an honest refusal (refusal.json) and return early instead of crashing on
-    # A25's downstream CONTOUR_M-out-of-range symptom. Montecito is range-front (span ~15 m) -> None
-    # -> falls through to A25 unchanged. out_dir = OUT, the same dir main()'s success path writes to.
-    refusal = _terrain_applicability_gate(hydro["dem_raw"], hydro["dem_nodata"], fire["out_dir"])
-    if refusal is not None:
-        return refusal     # polymorphic: the refusal-result, NOT the ranked dict (caller dispatches on status)
 
     # A25 carve-out: fail loud if CONTOUR_M is grossly mis-set for this DEM BEFORE detecting outlets
     # (else a wrong-fire contour silently yields zero/wrong canyon mouths). Montecito 150 m is inside

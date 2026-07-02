@@ -30,12 +30,20 @@ _spec.loader.exec_module(gate)
 run_pipeline = gate.run_pipeline
 dispatch_result = gate.dispatch_result
 MONTECITO_FIRE = gate.MONTECITO_FIRE
+SOUTHFORK_FIRE = gate.SOUTHFORK_FIRE
 
 from src.outputs import write_outputs
 
 # Registry of runnable fires. Add production fires here (data/<fire>/ paths + expected_crs +
-# validation_case) as they land; MONTECITO_FIRE is the validated reconstruction case.
-FIRES = {"montecito": MONTECITO_FIRE}
+# validation_case) as they land; MONTECITO_FIRE is the validated reconstruction case. SOUTHFORK_FIRE
+# (A31) is the incised-terrain refusal demonstration -- its data is gitignored, so it is registered but
+# data-absent on a clean checkout (see _assert_inputs_present), NOT a CI dependency.
+FIRES = {"montecito": MONTECITO_FIRE, "southfork": SOUTHFORK_FIRE}
+
+# The on-disk INPUT paths a fire dict may carry (out_dir is an OUTPUT, name/expected_crs/validation_case
+# are not paths). A None value is "absent by design" (e.g. sbs=None for a dNBR-only fire), never a
+# missing-file error -- only a non-None path to a nonexistent file is a data-absence exit.
+_INPUT_PATH_KEYS = ("dem", "sbs", "assets", "creeks")
 
 
 def resolve_fire(name):
@@ -45,6 +53,26 @@ def resolve_fire(name):
     return FIRES[name]
 
 
+def _assert_inputs_present(fire):
+    """A31 driver-layer data-absence guard: every NON-None input path must exist before the pipeline runs.
+
+    A registered fire whose (gitignored) data is absent on a clean checkout must exit CLEANLY with an
+    acquisition pointer instead of crashing deep in rasterio.open/load_dem. `sbs=None` (no SBS by design,
+    e.g. South Fork's dNBR-only burn) is a legitimate value and is SKIPPED -- only a non-None path to a
+    missing file triggers the exit. Generic: applies to ANY registered fire, not South-Fork-special-cased.
+    This lives in the DRIVER (not run_pipeline): run_pipeline stays a library function that RAISES on bad
+    input; the driver is where a data-absent fire becomes a clean SystemExit.
+    """
+    for key in _INPUT_PATH_KEYS:
+        path = fire.get(key)
+        if path is None:
+            continue                                  # absent by design (e.g. sbs=None); never a missing-file error
+        if not Path(path).exists():
+            raise SystemExit(
+                f"{fire['name']} data not present (gitignored): missing {key} at {path}; "
+                "see acquisition_manifest.json")
+
+
 def run_fire(fire):
     """Run the pipeline for one fire, dispatch the polymorphic result, and write outputs if ranked.
 
@@ -52,7 +80,10 @@ def run_fire(fire):
     refusal message and returns 0 and NO ranking is written (refusal.json was already written by the
     pipeline). On a ranked result, writes ranking.csv + basins.geojson stamped with this fire's
     validation_case. Does not run the pipeline twice or print the gate's validation probes (A7: thin).
+
+    A31: a data-absent registered fire exits cleanly here (before the pipeline) via _assert_inputs_present.
     """
+    _assert_inputs_present(fire)                          # clean SystemExit if any non-None input path is missing
     result = run_pipeline(fire)
     code = dispatch_result(result)                       # refusal -> prints + exit 0; ranked -> 0
     if result["status"] == "ranked":
