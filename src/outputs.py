@@ -126,6 +126,7 @@ def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source,
             "basin_id": b["basin_id"], "rank": b["rank"], "score": round(b["score"], 6),
             "mean_burn": round(b["mean_burn"], 4), "mean_slope": round(b["mean_slope"], 4),
             "area_km2": round(b["area_km2"], 4), "burn_coverage_frac": round(b["burn_coverage_frac"], 4),
+            # drains_to_asset tautologically True: delineate only emits basins past the 600 m drains-to-asset filter (A19/C9)
             "drains_to_asset": True, "flowed": b["flowed"],
             "matched_creek": b["matched_creek"],
             "nearest_outlet_dist_m": round(near[1], 1) if near[1] is not None else "",
