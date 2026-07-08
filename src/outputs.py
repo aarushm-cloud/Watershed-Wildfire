@@ -167,3 +167,94 @@ def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source,
     with open(gj_path, "w") as fh:
         json.dump(fc, fh)
     return csv_path, gj_path, df
+
+
+# A32 dNBR framing (n=1), carried on every dNBR artifact -- triage-validated, NOT exact-rank-validated.
+# Do not soften: the pre-registered exact-#1 criterion FAILED on the one validated fire (by 1.03%).
+DNBR_FRAMING = (
+    "dNBR ranking: triage-validated (finds the flow basins as well as field-validated SBS on the one "
+    "validated fire, rank-AUC 0.9722), NOT exact-rank-validated (n=1). Arm A (binned) is the primary "
+    "headline ranking; Arm B (continuous) is a companion. rank_delta = |rankA - rankB| flags basins "
+    "where the two burn methods disagree -- treat those ranks as uncertain.")
+
+
+def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
+                       validation_case="Thomas_Fire_2017/Montecito_2018 (dNBR both-arms)"):
+    """Write {out_dir}/{ranking.csv, basins.geojson} for the dNBR BOTH-ARMS path (A32/P2.2c).
+
+    Arm A (binned) is the headline ranking (rank/score); Arm B (continuous) rides alongside
+    (rank_b/score_b) with rank_delta = |rankA - rankB| as the honest uncertainty flag. Every artifact
+    carries SCREENING_STATEMENT + the n=1 DNBR_FRAMING + burn_source=dNBR. This is the dNBR sibling of
+    write_outputs (which stays the untouched SBS single-arm writer); it recomputes no score/rank.
+
+    arm_a / arm_b -- the per-arm dicts from run_pipeline (each carries 'basins' scored + 'ranked').
+    creek_nearest -- per-creek nearest-outlet info, or None (a real fire with no truth-creek layer).
+    out_dir -- output dir; dem_tif -- DEM path for the GeoJSON transform/CRS re-open (A25)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    b_by = {b["basin_id"]: b for b in arm_b["basins"]}
+
+    nearest_by_basin = {}
+    if creek_nearest is not None:
+        for creek, info in creek_nearest.items():
+            bid = info["basin_id"]
+            if bid not in nearest_by_basin or info["dist_m"] < nearest_by_basin[bid][1]:
+                nearest_by_basin[bid] = (creek, info["dist_m"])
+
+    rows = []
+    for a in sorted(arm_a["basins"], key=lambda x: x["rank"]):   # order by the Arm A headline rank
+        bid = a["basin_id"]
+        b = b_by[bid]
+        near = nearest_by_basin.get(bid, (None, None))
+        rows.append({
+            "basin_id": bid,
+            "rank": a["rank"], "score": round(a["score"], 6),            # Arm A -- headline
+            "rank_b": b["rank"], "score_b": round(b["score"], 6),        # Arm B -- companion
+            "rank_delta": abs(a["rank"] - b["rank"]),                    # honest uncertainty flag
+            "mean_burn_a": round(a["mean_burn"], 4), "mean_burn_b": round(b["mean_burn"], 4),
+            "mean_slope": round(a["mean_slope"], 4),                     # identical across arms (terrain)
+            "area_km2": round(a["area_km2"], 4),                         # identical across arms (delineation)
+            "burn_coverage_frac": round(a["burn_coverage_frac"], 4),    # Arm A operational (A23)
+            "low_coverage": a["low_coverage"],
+            "flowed": a.get("flowed", False), "matched_creek": a.get("matched_creek", ""),
+            "nearest_outlet_dist_m": round(near[1], 1) if near[1] is not None else "",
+        })
+    df = pd.DataFrame(rows)
+    csv_path = out_dir / "ranking.csv"
+    with open(csv_path, "w") as fh:
+        fh.write(f"# {SCREENING_STATEMENT}\n")
+        fh.write(f"# {DNBR_FRAMING}\n")
+        fh.write(f"# burn_source=dNBR  validation_case={validation_case}\n")
+        df.to_csv(fh, index=False)
+
+    # basins.geojson: vectorise each Arm A basin mask, reproject to EPSG:4326, both-arm properties.
+    with rasterio.open(dem_tif) as s:
+        transform = s.transform
+        dem_crs = s.crs              # A25: per-fire CRS read off the DEM handle (not a constant)
+    geoms, props = [], []
+    for a in sorted(arm_a["basins"], key=lambda x: x["rank"]):
+        bid = a["basin_id"]
+        b = b_by[bid]
+        mask = a["mask"].astype(np.uint8)
+        polys = [shapely_shape(geom) for geom, val in
+                 rfeatures.shapes(mask, mask=a["mask"], transform=transform) if val == 1]
+        geoms.append(unary_union(polys))
+        props.append({"basin_id": bid, "rank": a["rank"], "score": round(a["score"], 6),
+                      "rank_b": b["rank"], "score_b": round(b["score"], 6),
+                      "rank_delta": abs(a["rank"] - b["rank"]),
+                      "mean_burn_a": round(a["mean_burn"], 4), "mean_burn_b": round(b["mean_burn"], 4),
+                      "mean_slope": round(a["mean_slope"], 4), "area_km2": round(a["area_km2"], 4),
+                      "burn_coverage_frac": round(a["burn_coverage_frac"], 4),
+                      "flowed": a.get("flowed", False), "matched_creek": a.get("matched_creek", ""),
+                      "burn_source": "dNBR", "screening": SCREENING_STATEMENT})
+    gdf = gpd.GeoDataFrame(props, geometry=geoms, crs=dem_crs).to_crs("EPSG:4326")
+    gj_path = out_dir / "basins.geojson"
+    gdf.to_file(gj_path, driver="GeoJSON")
+    with open(gj_path) as fh:
+        fc = json.load(fh)
+    fc["provenance"] = {"burn_source": "dNBR", "screening": SCREENING_STATEMENT,
+                        "dnbr_framing": DNBR_FRAMING, "headline_arm": "arm_a (binned)",
+                        "companion_arm": "arm_b (continuous)",
+                        "validation_case": validation_case, "crs": "EPSG:4326"}
+    with open(gj_path, "w") as fh:
+        json.dump(fc, fh)
+    return csv_path, gj_path

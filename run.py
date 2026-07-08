@@ -25,19 +25,19 @@ if str(_REPO_ROOT) not in sys.path:
 # The pipeline (run_pipeline + the stage order + the A27 refusal dispatch + the per-fire configs) was
 # promoted verbatim into src/pipeline.py (behavior-neutral); run.py imports it directly from there now
 # instead of loading validation/gate.py by file path. write_outputs is the DAG sink (src/outputs.py).
-from src.pipeline import run_pipeline, dispatch_result, MONTECITO_FIRE, SOUTHFORK_FIRE
-from src.outputs import write_outputs
+from src.pipeline import run_pipeline, dispatch_result, MONTECITO_FIRE, SOUTHFORK_FIRE, MONTECITO_DNBR_FIRE
+from src.outputs import write_outputs, write_dnbr_outputs
 
 # Registry of runnable fires. Add production fires here (data/<fire>/ paths + expected_crs +
 # validation_case) as they land; MONTECITO_FIRE is the validated reconstruction case. SOUTHFORK_FIRE
 # (A31) is the incised-terrain refusal demonstration -- its data is gitignored, so it is registered but
 # data-absent on a clean checkout (see _assert_inputs_present), NOT a CI dependency.
-FIRES = {"montecito": MONTECITO_FIRE, "southfork": SOUTHFORK_FIRE}
+FIRES = {"montecito": MONTECITO_FIRE, "southfork": SOUTHFORK_FIRE, "montecito_dnbr": MONTECITO_DNBR_FIRE}
 
 # The on-disk INPUT paths a fire dict may carry (out_dir is an OUTPUT, name/expected_crs/validation_case
 # are not paths). A None value is "absent by design" (e.g. sbs=None for a dNBR-only fire), never a
 # missing-file error -- only a non-None path to a nonexistent file is a data-absence exit.
-_INPUT_PATH_KEYS = ("dem", "sbs", "assets", "creeks")
+_INPUT_PATH_KEYS = ("dem", "sbs", "dnbr", "assets", "creeks")
 
 
 def resolve_fire(name):
@@ -81,10 +81,18 @@ def run_fire(fire):
     result = run_pipeline(fire)
     code = dispatch_result(result)                       # refusal -> prints + exit 0; ranked -> 0
     if result["status"] == "ranked":
-        csv_path, gj_path, _ = write_outputs(
-            result["basins"], result["creek_nearest"], fire["out_dir"], fire["dem"],
-            result["provenance"]["burn_source"], validation_case=fire["validation_case"])
-        print(f"[{fire['name']}] ranked: {len(result['basins'])} basins; wrote {csv_path} , {gj_path}")
+        if result["provenance"]["burn_source"] == "dNBR":
+            # A32 dNBR both-arms: Arm A headline + Arm B companion + rank_delta (src/outputs.write_dnbr_outputs)
+            csv_path, gj_path = write_dnbr_outputs(
+                result["arms"]["arm_a"], result["arms"]["arm_b"], result["creek_nearest"],
+                fire["out_dir"], fire["dem"], validation_case=fire["validation_case"])
+            n = len(result["arms"]["arm_a"]["basins"])
+            print(f"[{fire['name']}] ranked (dNBR both-arms): {n} basins; wrote {csv_path} , {gj_path}")
+        else:
+            csv_path, gj_path, _ = write_outputs(
+                result["basins"], result["creek_nearest"], fire["out_dir"], fire["dem"],
+                result["provenance"]["burn_source"], validation_case=fire["validation_case"])
+            print(f"[{fire['name']}] ranked: {len(result['basins'])} basins; wrote {csv_path} , {gj_path}")
     return code
 
 
