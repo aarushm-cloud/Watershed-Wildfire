@@ -6,7 +6,8 @@ P1.5 / P2.2a SCOPE (behavior-preserving): the frozen scoring + ranking stage (th
 reduction + the A18 coverage flag). EXPLICIT-ARGS signature (no dict-bag): the precomputed per-cell
 burn WEIGHT raster `wt` (A17) and `covered` mask (A18) -- produced ONCE by the ingest seam
 (ingest.ingest_burn, where `_burn_weight_raster` moved in P2.2a) -- plus the per-cell `slope` raster
-arrive as named args. score imports neither ingest nor grids; the per-basin mean over basin masks
+arrive as named args. score imports the shared GateAbort contract from grids (A32 empty-mask
+guard) and nothing else from grids, nothing from ingest; the per-basin mean over basin masks
 (which needs the delineated basins) stays here.
 
 FROZEN (do NOT touch): the term order AND evaluation order of `mean_burn * mean_slope * area_km2`
@@ -14,6 +15,8 @@ FROZEN (do NOT touch): the term order AND evaluation order of `mean_burn * mean_
 tercile logic; the A17 direction (class 15 / outside-perimeter -> 0.0, INCLUDED in the burn mean --
 now applied in the weight raster at ingest); A18 coverage = sbs in {1,2,3,4} (excludes Developed=0
 + NoData=15), `low_coverage` flag-only (never excludes a basin from the ranking). No new types (C9).
+A32: mean_slope raises GateAbort on an empty mask -- never `else 0.0` (that would mask a broken
+MIN_BASIN_KM2 invariant as a "low slope"; A8/A29 fail-loud).
 
 IMPORT-TIME I/O BAN: nothing executes at module load; imports config + numpy only.
 """
@@ -22,6 +25,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.config import BURN_LOW_COVERAGE
+from src.grids import GateAbort
 
 
 def stage_2e_score(wt, covered, slope, basins):
@@ -40,7 +44,27 @@ def stage_2e_score(wt, covered, slope, basins):
         b["burn_coverage_frac"] = ncov / ncells if ncells else 0.0
         # A17: mean over ALL basin cells; outside-perimeter/NoData(15) included as 0.0
         b["mean_burn"] = float(np.mean(wt[m])) if ncells else 0.0
-        b["mean_slope"] = float(np.mean(slope[m]))                       # tan(theta), dimensionless
+        # A32: empty mask != low slope. Unlike the two siblings' `else 0.0` (a meaningful zero),
+        # an empty mask means delineate's MIN_BASIN_KM2 guarantee broke -> fail loud, not nan.
+        if not ncells:
+            raise GateAbort(
+                f"basin {b['basin_id']}: mean_slope on empty mask (ncells=0) -- violates "
+                f"delineate's MIN_BASIN_KM2 guarantee, so the run's premises are broken (A32). "
+                f"Refusing to emit a nan score."
+            )
+        # A33 (R1 coastal-slope): mean_slope_tan drops the nodata-adjacent ring to NaN (a valid land
+        # cell next to a 0-clamped nodata cell reads a spurious cliff, FM-12). Mean over the basin's
+        # CLEAN (non-NaN) slope cells only, so a coastal basin touching nodata is not silently inflated.
+        # Montecito basins are inland -> no NaN -> mean unchanged (byte-identical). A basin whose slope
+        # is entirely NaN (sits wholly on the ring) -> fail loud (premises void, A8, like the A32 guard).
+        sl = slope[m]
+        sl = sl[~np.isnan(sl)]
+        if sl.size == 0:
+            raise GateAbort(
+                f"basin {b['basin_id']}: every slope cell is nodata-contaminated (dropped ring) -- the "
+                f"basin sits entirely on the FM-12 nodata edge; refusing a nan score (A33/A8 fail-loud)."
+            )
+        b["mean_slope"] = float(np.mean(sl))                             # tan(theta), dimensionless
         b["score"] = b["mean_burn"] * b["mean_slope"] * b["area_km2"]    # burn[0-1] x slope[tan] x km^2
         b["low_coverage"] = b["burn_coverage_frac"] < BURN_LOW_COVERAGE
 

@@ -1,4 +1,4 @@
-"""CF-A (A32 / P2.2c): run_pipeline scores a dNBR fire through BOTH arms and reproduces the committed
+"""CF-A (A34 / P2.2c): run_pipeline scores a dNBR fire through BOTH arms and reproduces the committed
 P2.3 Montecito swap-test oracle.
 
 The dNBR scoring path was built + unit-tested (src.ingest.ingest_dnbr_both_arms) but UNWIRED --

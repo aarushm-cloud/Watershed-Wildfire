@@ -56,7 +56,7 @@ from src.hydrology import run_hydrology
 # Canyon-mouth outlet detection + catchment delineation (FM-1 index-mode catchment) + the A25/A27
 # terrain guards (src/delineate.py). run_pipeline unpacks hydro and passes explicit args.
 from src.delineate import (stage_2b_outlets, stage_2c_delineate, assert_contour_in_dem_range,
-                           assess_hypsometric_applicability)
+                           assess_hypsometric_applicability, _valid_dem_mask)
 # Frozen scoring + ranking (src/score.py); the frozen formula + per-basin reduction live there.
 from src.score import stage_2e_score
 # Refusal artifact + human message (src/outputs.py); the A27 gate writes refusal.json via these.
@@ -109,12 +109,12 @@ SOUTHFORK_FIRE = {
     "validation_case": "South_Fork_Fire_2024",
 }
 
-# A32 / P2.2c verification fire: the Montecito case run through the dNBR BOTH-ARMS path (sbs=None), fed
+# A34 / P2.2c verification fire: the Montecito case run through the dNBR BOTH-ARMS path (sbs=None), fed
 # the committed native dNBR raster (validation/out/montecito_dnbr/dnbr_native.tif -- the P2.3 swap-test
 # input). Delineation is burn-independent (DEM + assets only), so this yields the SAME 36 basins as
 # MONTECITO_FIRE and must REPRODUCE the P2.3 side-by-side (Arm A -> San Ysidro #1 / Cold Spring #2;
 # Arm B -> Cold Spring #1; rank-AUC 0.9722 both arms). creeks present so evaluate() reproduces the
-# oracle AUC; sbs=None routes to the dNBR arm (A32). "dnbr" is the new optional per-fire burn-input key.
+# oracle AUC; sbs=None routes to the dNBR arm (A34). "dnbr" is the new optional per-fire burn-input key.
 _MONTECITO_DNBR = OUT / "montecito_dnbr" / "dnbr_native.tif"
 MONTECITO_DNBR_FIRE = {
     "name": "montecito_dnbr",
@@ -175,7 +175,7 @@ def stage_2a_hydrology(fire, dem_artifacts=None):
 
     # SBS path: open the SBS and align it to the DEM (CRS == expected zone, equal shape, equal affine)
     # -- src/grids.assert_aligned (extracted verbatim, P2.2a). expected_crs threaded per-fire (A30/A25).
-    # A dNBR fire (sbs=None, A32) has NO SBS to align here: its dNBR raster is reprojected+aligned onto
+    # A dNBR fire (sbs=None, A34) has NO SBS to align here: its dNBR raster is reprojected+aligned onto
     # the DEM grid downstream in ingest_dnbr_both_arms. The DEM-RESOLUTION check is a single-layer DEM
     # property (not pairwise), so it runs either way.
     if fire.get("sbs") is not None:
@@ -223,7 +223,7 @@ def classify_master_zone(area_km2: float) -> str:
 # raster + A18 coverage come from the ingest seam (ingest_burn), the slope raster is computed here, and
 # all three feed stage_2e_score. mean_slope_tan stays with the pipeline (terrain derivative, passed in).
 # ---------------------------------------------------------------------------
-def mean_slope_tan(dem_raw: np.ndarray) -> np.ndarray:
+def mean_slope_tan(dem_raw: np.ndarray, dem_nodata=None) -> np.ndarray:
     """Per-cell slope as tan(theta) = rise/run gradient magnitude, DIMENSIONLESS.
 
     OWNER-CONFIRMED transform (reproduces the report mean_slope column to +/-0.01).
@@ -231,9 +231,29 @@ def mean_slope_tan(dem_raw: np.ndarray) -> np.ndarray:
     gradient components are dimensionless. ("0-1 transport-energy proxy" in
     science_reference s1 is a typical-range description, not a hard bound; tan stays
     < 1 here because mean basin slopes are ~31 deg.)
-    """
+
+    A33 (R1 coastal-slope; owner override of the 2026-07-06 deferral, 2026-07-07): np.gradient over a
+    DEM whose nodata is clamped to 0 (FM-12) reads a spurious cliff at a VALID land cell adjacent to a
+    nodata cell -- the contamination is in the valid cell whose 0-neighbor the gradient consumed, which
+    is why masking at the mean does NOT remove it (A33 point 2). So when dem_nodata is given, drop the
+    nodata-adjacent RING at SOURCE: an invalid cell OR a valid orthogonal neighbor of one -> NaN, and
+    stage_2e_score means over the clean cells only. Validity uses the SAME _valid_dem_mask the A25/A27
+    guards use (delineate.py) -- resolving A33's open question (slope no longer bypasses the shared
+    valid-mask). dem_nodata=None (legacy callers, finite DEM) -> no drop, byte-identical to before."""
     gy, gx = np.gradient(dem_raw, CELL_M, CELL_M)   # d/d(row), d/d(col) in z per metre
-    return np.hypot(gx, gy)                          # tan(theta), rise/run
+    slope = np.hypot(gx, gy)                          # tan(theta), rise/run
+    valid = _valid_dem_mask(dem_raw, dem_nodata)     # shared single-source definition (A27/delineate)
+    inv = ~valid
+    if inv.any():
+        adj = np.zeros_like(inv)                     # valid cells orthogonally adjacent to an invalid cell
+        adj[1:, :]  |= inv[:-1, :]                   # neighbor above invalid
+        adj[:-1, :] |= inv[1:, :]                    # below
+        adj[:, 1:]  |= inv[:, :-1]                   # left
+        adj[:, :-1] |= inv[:, 1:]                    # right
+        drop = inv | (valid & adj)                   # nodata cells + the valid nodata-adjacent ring
+        slope = slope.copy()
+        slope[drop] = np.nan                         # dropped at source; per-basin mean skips NaN (A33/score.py)
+    return slope
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +399,7 @@ def dispatch_result(result):
 
 
 # ---------------------------------------------------------------------------
-# dNBR both-arms scoring helpers (A32 / P2.2c). Faithful to the FROZEN P2.3 swap-test machinery
+# dNBR both-arms scoring helpers (A34 / P2.2c). Faithful to the FROZEN P2.3 swap-test machinery
 # (validation/p2_3_swap_test._build_arm + validation/p2_run_dnbr helpers), lifted into the production
 # pipeline so run_pipeline can score dNBR directly. score.py and the frozen formula are UNTOUCHED.
 # ---------------------------------------------------------------------------
@@ -468,11 +488,11 @@ def run_pipeline(fire=None):
     basins = stage_2c_delineate(hydro["grid"], hydro["acc"], hydro["fdir_raster"],
                                 hydro["transform"], hydro["shape"], outlets, asset_xy)
 
-    slope = mean_slope_tan(hydro["dem_raw"])       # per-cell tan(theta) slope raster (2d, DEM-only)
+    slope = mean_slope_tan(hydro["dem_raw"], hydro["dem_nodata"])   # tan(theta) raster (2d); A33 drops the nodata ring
 
     # Truth-creek matching is burn-independent (delineation-based) -- compute it ONCE if this fire carries
     # a truth-creek layer (validation). A real un-assessed fire has none (creeks=None): rank only, no
-    # evaluate() (A32/CF-A). The FM-10 geometry abort stays a hard fail-loud whenever creeks ARE present.
+    # evaluate() (A34/CF-A). The FM-10 geometry abort stays a hard fail-loud whenever creeks ARE present.
     creeks, creek_nearest = None, None
     if fire.get("creeks") is not None:
         creeks = load_creeks(fire["creeks"])     # GeoDataFrame; src/ingest.py
@@ -483,7 +503,7 @@ def run_pipeline(fire=None):
 
     # Burn dispatch. Per-fire INPUT routing (A30): an SBS raster present -> the validated single-source
     # SBS path (the A4/A15 coverage SELECTION stays inside ingest_burn, UNCHANGED / byte-identical);
-    # otherwise the dNBR BOTH-ARMS path (A32/P2.2c). One source per fire, decided once, stamped once --
+    # otherwise the dNBR BOTH-ARMS path (A34/P2.2c). One source per fire, decided once, stamped once --
     # never re-decided or blended downstream (A4/A15).
     if fire.get("sbs") is not None:
         # ===== SBS path -- UNCHANGED (the Montecito behavior lock is the tripwire) =====
@@ -496,7 +516,7 @@ def run_pipeline(fire=None):
                 "creek_nearest": creek_nearest, "metrics": metrics,
                 "provenance": provenance}   # A4/A15: single burn-source stamp from the ingest seam
 
-    # ===== dNBR both-arms path (A32 / P2.2c) =====
+    # ===== dNBR both-arms path (A34 / P2.2c) =====
     dnbr_path = fire.get("dnbr")
     if dnbr_path is None:
         raise GateAbort("run_pipeline: fire provides neither 'sbs' nor 'dnbr' -- no burn input (A8 fail-loud).")
@@ -511,7 +531,7 @@ def run_pipeline(fire=None):
         guard_basins = basins
     _dnbr_nodata_guard(guard_basins, D["nodata_mask"])
 
-    # Score BOTH arms on independent copies of the burn-independent delineation (A32). Arm A (binned) is
+    # Score BOTH arms on independent copies of the burn-independent delineation (A34). Arm A (binned) is
     # the pre-registered headline; Arm B (continuous) is the non-gating companion. slope + area are identical
     # across arms; only mean_burn moves. Mirrors the frozen P2.3 swap-test _build_arm machinery.
     arm_a = _score_one_arm(basins, D["arm_a"]["wt"], D["arm_a"]["covered"], slope, creek_nearest, D["covered_interp"])

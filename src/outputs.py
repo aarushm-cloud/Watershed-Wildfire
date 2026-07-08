@@ -169,7 +169,7 @@ def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source,
     return csv_path, gj_path, df
 
 
-# A32 dNBR framing (n=1), carried on every dNBR artifact -- triage-validated, NOT exact-rank-validated.
+# A34 dNBR framing (n=1), carried on every dNBR artifact -- triage-validated, NOT exact-rank-validated.
 # Do not soften: the pre-registered exact-#1 criterion FAILED on the one validated fire (by 1.03%).
 DNBR_FRAMING = (
     "dNBR ranking: triage-validated (finds the flow basins as well as field-validated SBS on the one "
@@ -180,7 +180,7 @@ DNBR_FRAMING = (
 
 def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
                        validation_case="Thomas_Fire_2017/Montecito_2018 (dNBR both-arms)"):
-    """Write {out_dir}/{ranking.csv, basins.geojson} for the dNBR BOTH-ARMS path (A32/P2.2c).
+    """Write {out_dir}/{ranking.csv, basins.geojson} for the dNBR BOTH-ARMS path (A34/P2.2c).
 
     Arm A (binned) is the headline ranking (rank/score); Arm B (continuous) rides alongside
     (rank_b/score_b) with rank_delta = |rankA - rankB| as the honest uncertainty flag. Every artifact

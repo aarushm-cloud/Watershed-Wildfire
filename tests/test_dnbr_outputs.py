@@ -1,4 +1,4 @@
-"""CF-A (A32) output layer: the dNBR both-arms ranking.csv + basins.geojson.
+"""CF-A (A34) output layer: the dNBR both-arms ranking.csv + basins.geojson.
 
 Arm A (binned) is the headline ranking (rank / score); Arm B (continuous) rides alongside
 (rank_b / score_b) with rank_delta = |rankA - rankB| as an honest uncertainty flag (basins where the

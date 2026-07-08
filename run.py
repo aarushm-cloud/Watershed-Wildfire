@@ -82,7 +82,7 @@ def run_fire(fire):
     code = dispatch_result(result)                       # refusal -> prints + exit 0; ranked -> 0
     if result["status"] == "ranked":
         if result["provenance"]["burn_source"] == "dNBR":
-            # A32 dNBR both-arms: Arm A headline + Arm B companion + rank_delta (src/outputs.write_dnbr_outputs)
+            # A34 dNBR both-arms: Arm A headline + Arm B companion + rank_delta (src/outputs.write_dnbr_outputs)
             csv_path, gj_path = write_dnbr_outputs(
                 result["arms"]["arm_a"], result["arms"]["arm_b"], result["creek_nearest"],
                 fire["out_dir"], fire["dem"], validation_case=fire["validation_case"])
