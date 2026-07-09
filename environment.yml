@@ -46,5 +46,8 @@ dependencies:
   # --- frontend (local Streamlit UI; app.py, A36 -- CF-D) ---
   - streamlit==1.59.1      # thin coordinate-entry UI over run_pipeline
   - streamlit-folium==0.27.2  # draw-the-bbox map widget + result map embedding
+  # --- confidence checks (dev/validation only; NOT imported by src/ or app.py at runtime, CF-E) ---
+  - pyflwdir==0.5.12       # independent flow engine for the pysheds cross-check (validation/cf11_*)
   # --- test ---
   - pytest==9.0.3
+  - hypothesis==6.156.3    # property-based tests for the frozen scoring invariants (CF-12)
