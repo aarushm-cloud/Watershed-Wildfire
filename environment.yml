@@ -39,6 +39,8 @@ dependencies:
   - pyogrio==0.12.1        # ACTIVE geopandas I/O engine (fiona omitted on purpose)
   - pyproj==3.7.2          # CRS / EPSG:32611 transforms (load-bearing for distances)
   - libgdal-core==3.12.3   # GDAL: load-bearing under rasterio + pyogrio
+  # --- acquisition layer (network; acquire.py, A35 -- outside pure src/) ---
+  - osmnx==2.1.0           # OSM building footprints via Overpass (acquire.fetch_buildings, CF-C)
   # --- outputs / viz ---
   - folium==0.20.0         # static map (outputs stage)
   # --- test ---
