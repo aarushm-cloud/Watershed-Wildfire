@@ -42,6 +42,9 @@ dependencies:
   # --- acquisition layer (network; acquire.py, A35 -- outside pure src/) ---
   - osmnx==2.1.0           # OSM building footprints via Overpass (acquire.fetch_buildings, CF-C)
   # --- outputs / viz ---
-  - folium==0.20.0         # static map (outputs stage)
+  - folium==0.20.0         # static map (outputs stage) + the frontend basin map (app.py)
+  # --- frontend (local Streamlit UI; app.py, A36 -- CF-D) ---
+  - streamlit==1.59.1      # thin coordinate-entry UI over run_pipeline
+  - streamlit-folium==0.27.2  # draw-the-bbox map widget + result map embedding
   # --- test ---
   - pytest==9.0.3

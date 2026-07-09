@@ -30,7 +30,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import acquire  # noqa: E402
-from acquire import tiles_for_bbox, assert_raw_dnbr, build_fire_config  # noqa: E402
+from acquire import tiles_for_bbox, assert_raw_dnbr, build_fire_config, _buildings_to_points  # noqa: E402
 from src.grids import GateAbort  # noqa: E402  (the A8 fail-loud contract acquire raises)
 
 
@@ -55,6 +55,25 @@ def test_tiles_for_bbox_spans_multiple_tiles():
     # A bbox straddling two integer lon AND two integer lat lines -> the 2x2 tile block.
     got = tiles_for_bbox(-106.5, 33.5, -105.5, 34.5)
     assert sorted(got) == ["n34w106", "n34w107", "n35w106", "n35w107"]
+
+
+# ---- CF-8: building footprints -> POINT assets (the pipeline contract) -------------------------
+
+def test_buildings_to_points_converts_footprints_to_points():
+    # pipeline.py reads assets.geometry.x/.y -> the asset layer MUST be Point geoms (validated
+    # Montecito assets are 12,221 Points). OSM building=* returns Polygons (+ the odd node Point);
+    # fetch_buildings must reduce every footprint to a representative point in the canonical CRS.
+    import geopandas as gpd
+    from shapely.geometry import Polygon, Point
+    gdf = gpd.GeoDataFrame(
+        {"building": ["yes", "house"]},
+        geometry=[Polygon([(-105.70, 33.40), (-105.70, 33.41), (-105.69, 33.41), (-105.69, 33.40)]),
+                  Point(-105.68, 33.40)],
+        crs="EPSG:4326")
+    pts = _buildings_to_points(gdf, "EPSG:32613")
+    assert set(pts.geom_type) == {"Point"}                 # Point-only (pipeline contract)
+    assert pts.crs.to_epsg() == 32613                      # reprojected to the canonical CRS
+    assert len(pts) == 2                                   # one point per input footprint
 
 
 # ---- CF-9: dNBR raw-scale guard (Tier-1-adjacent: protects the frozen raw-dNBR bins) -----------

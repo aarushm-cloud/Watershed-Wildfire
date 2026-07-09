@@ -201,6 +201,22 @@ def fetch_dem(bbox, grid: GridSpec, out_path, *, dem_nodata: float = DEM_NODATA)
 
 # ---- CF-8: buildings auto-fetch (generalizes validation/p3_acquire_assets.py) ------------------
 
+def _buildings_to_points(gdf, dst_crs):
+    """Reduce OSM building footprints to one representative POINT each, in `dst_crs`.
+
+    The pipeline's asset layer MUST be Point geometries -- `stage_2c` reads `assets.geometry.x/.y`
+    (the validated Montecito assets are 12,221 Points). OSM `building=*` returns Polygons (plus the
+    odd node Point), so every footprint is reduced to its centroid; a building's *presence*, not its
+    outline, is what the drains-to-asset screening test (DRAINS_TO_ASSET_M) needs. Centroids are
+    computed in the projected (metric) CRS, never in lon/lat.
+    """
+    gdf = gdf.set_crs("EPSG:4326") if gdf.crs is None else gdf
+    # GPKG can't store OSM list-valued tag columns; keep geometry only (assets are presence, not attrs).
+    proj = gdf[[c for c in gdf.columns if c == "geometry"]].copy().to_crs(_norm_epsg(dst_crs))
+    proj["geometry"] = proj.geometry.centroid   # Polygon/MultiPolygon/Point -> POINT (metric CRS)
+    return proj
+
+
 def fetch_buildings(bbox, dst_crs, out_path, *, buf_deg: float = 0.012):
     """Fetch OSM building footprints over `bbox` (buffered ~1 km for edge assets) via osmnx/Overpass,
     reproject to `dst_crs`, and stage a GeoPackage. Fails loud on 0 buildings over a populated AOI
@@ -215,13 +231,11 @@ def fetch_buildings(bbox, dst_crs, out_path, *, buf_deg: float = 0.012):
     if gdf is None or len(gdf) == 0:
         raise GateAbort("FAIL: Overpass returned 0 buildings over the AOI (A8) -- unexpected for a "
                          "populated area; treat as a source/endpoint problem, not 'no assets'.")
-    gdf = gdf.set_crs("EPSG:4326") if gdf.crs is None else gdf
-    # GPKG can't store OSM list-valued tag columns; keep geometry only (assets are presence, not attrs).
-    proj = gdf[[c for c in gdf.columns if c == "geometry"]].copy().to_crs(_norm_epsg(dst_crs))
+    pts = _buildings_to_points(gdf, dst_crs)   # footprints -> representative POINTS (pipeline contract)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    proj.to_file(out_path, driver="GPKG")
-    return out_path, int(len(proj))
+    pts.to_file(out_path, driver="GPKG")
+    return out_path, int(len(pts))
 
 
 # ---- CF-9: dNBR raw-scale guard + A30 fire-config assembly -------------------------------------
