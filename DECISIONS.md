@@ -266,3 +266,202 @@ New `run_pipeline` order:
 **Non-goals / defer.**
 - No dNBR wiring. The A29 fail-loud on non-SBS burn selection stands; full dNBR end-to-end dispatch is P2.2c (council-gated).
 - No promotion of `run_pipeline` out of `validation/gate.py` (deferred nit).
+
+---
+
+### A32 — `mean_slope` raises `GateAbort` on an empty mask (run-premises-void, not sibling-symmetry)
+
+*(IDs: A32 = this; A33 = the coastal deferral below. Assigned as the next two free above the live
+max A31 (pipeline reorder). An earlier draft proposed A31/A32 for these two, but A31 was already
+taken by the ordering ADR — hence the renumber.)*
+
+- **Context.** In `src/score.py`, three per-basin quantities are computed side by side.
+  `burn_coverage_frac` (line 40) and `mean_burn` (line 42) each carry a `… if ncells else 0.0`
+  guard; `mean_slope` (line 43) did not. An empty mask therefore yielded `np.mean(slope[[]]) → nan
+  → score = mean_burn × nan × area → nan`, a silent nan poisoning the ranking. Unreachable on
+  Montecito and under current `delineate` (which guarantees every retained basin ≥ `MIN_BASIN_KM2`),
+  but the guard was genuinely absent from shipped code — a live asymmetry, not a hypothetical.
+- **Decision.** `mean_slope` on `ncells == 0` **raises `GateAbort`**, with a message naming the basin
+  and the violated `MIN_BASIN_KM2` invariant. It does **not** return `0.0`.
+- **Reasoning.** The rationale is **premises-void, not symmetry with the siblings.**
+  `mean_burn`/`burn_coverage_frac` return `0.0` because a zero there is a *meaningful* value (a
+  genuinely unburned or fully-uncovered basin). An empty *mask* is not a meaningful zero — it means a
+  basin with no cells, which can only occur if `MIN_BASIN_KM2` has been violated upstream, i.e. the
+  run's own premises are broken. `GateAbort` halts all 36 basins; that blast radius is justified
+  **only** on premises-void grounds (the whole run is unsound), which is exactly the case here — so
+  the abort is correct, but it must be ratified on "empty mask ⇒ `MIN_BASIN_KM2` void ⇒ run premises
+  broken ⇒ abort," **not** on matching the sibling guards. (Ratifying on symmetry invites a future
+  reader to "fix" it back to `return 0.0` for consistency — the exact silent-failure this closes.)
+  This is A8/A29 fail-loud: an impossible-by-invariant state surfaces loudly rather than being
+  swallowed.
+- **Ship condition (test discipline).** Ships **with** a synthetic fixture that forces `ncells == 0`
+  and asserts the raise fires — constructed directly (the pipeline cannot produce this state, so the
+  fixture must build it by hand). A guard no fixture can trip is dead code by this project's own
+  standard; A32 does not ship without a passing trip-test.
+- **Frozen-value impact.** None. Formula, `BURN_WEIGHTS`, dNBR bins, `DIRMAP`/`D8_OFFSETS` untouched;
+  category-two fence intact. Behavior lock (AUC 0.9722 / 44.7273 km² / 36 basins) byte-identical — the
+  new path is unreachable on Montecito.
+- **Status.** RATIFIED + IMPLEMENTED locally 2026-07-06 (uncommitted — owner commits). Guard added in
+  `src/score.py` `stage_2e_score` (`raise GateAbort` on `ncells == 0`; imports `GateAbort` from
+  `grids`). Trip-fixture `tests/test_empty_mask_abort.py` (empty-mask → GateAbort; non-empty →
+  scores) passes; full suite 67/67; behavior lock 7/7 byte-identical (AUC 0.9722 / 44.7273 km² / 36
+  basins). Ratify-first commit sequencing (stub-before-code) and adversarial review left to the owner.
+  → FAILURE_MODES FM-13 (the `score = 0.0` / coverage family), DECISIONS **A18** (denominator basis),
+  **A29** (fail-loud-on-impossible-state precedent).
+
+---
+
+### A33 — Coastal-slope nodata contamination (R1): deferred 2026-07-06 → OVERRIDDEN + BUILT + COMMITTED `ebc1e06` (2026-07-07)
+
+> **⚠️ SUPERSEDED 2026-07-07 — the original "do not build" decision below was OVERRIDDEN by the owner and the real fix shipped.** `mean_slope_tan(dem_raw, dem_nodata)` now NaN-drops the nodata-adjacent ring via the shared `_valid_dem_mask` (answering the open question below — slope no longer bypasses the valid-mask); `stage_2e_score` means over the clean (non-NaN) cells, and an all-NaN basin fails loud (A8, like A32). Made testable via the synthetic coastal fixture `tests/test_coastal_slope.py`, which was the D0/untestable objection the deferral rested on. Montecito behavior lock byte-identical (inland basins → no NaN). Committed `ebc1e06`. **The deferred reasoning below is retained as the audit trail; the Status at the bottom is updated to reflect the build.** → FAILURE_MODES **FM-17**.
+
+- **Context.** `mean_slope_tan` (`src/pipeline.py:204`) runs `np.gradient` over the **raw** DEM and
+  applies no valid-cell mask, while every other DEM consumer — delineation and the A25/A27 guards —
+  intersects `_valid_dem_mask` (`src/delineate.py:49`). pysheds clamps undeclared nodata to 0 (FM-12),
+  so a valid land cell adjacent to a 0-clamped ocean/nodata cell reads a spurious cliff (Δ~100 m / 10 m
+  → `tan` of several), inflating that basin's `mean_slope` → `score` with no flag. This is the same
+  unenforced contract as A32's root cause: **slope is the one DEM derivative bypassing the shared
+  valid-mask.** R1 (this) and R3 (A32) are two symptoms of that one gap.
+- **Decision.** **Do not build a fix or a flag now.** Record the finding as a P3 hazard note and defer.
+  No per-basin adjacency scan, no boundary flag, no source change to `mean_slope_tan` in this cycle.
+- **Reasoning.**
+  1. **D0 / untestable.** There is no coastal fire, no nodata-contact AOI, and no fixture that can trip
+     a contamination flag today. Building a per-basin adjacency scan that no fixture can exercise is the
+     over-build D0 exists to prevent — the same "untestable machinery" objection that (correctly) sinks
+     it also means we cannot validate any fix against a real boundary.
+  2. **The naive fix is incomplete.** Intersecting `mean_slope` with `_valid_dem_mask` does **not**
+     remove the contamination: the spurious cliff lives in the *valid* land cell whose 0-clamped
+     neighbor `np.gradient` already consumed, not in the nodata cell itself. Removing it requires either
+     dropping the nodata-adjacent ring of cells or computing a correct boundary gradient — both are real
+     work that must be decided against real coastal data, not pre-committed blind.
+  3. **Flag-vs-fix is premature, not wrong.** The earlier "flag, don't silently drop" instinct (for
+     A18 consistency) isn't incorrect in spirit, but it can't be chosen over drop-ring or
+     boundary-gradient until a testable coastal case exists to distinguish them.
+- **The open question this note owns (answer at P3, before scoring any coastal fire).** *Why does
+  `mean_slope_tan` skip `_valid_dem_mask` when delineation and the A25/A27 guards apply it?* That single
+  decision — the slope term's nodata contract at the source — determines whether the eventual fix is a
+  flag, a drop-ring, or boundary-gradient correctness. Everything downstream (connectivity choice, flag
+  naming, flag-vs-drop) collapses into detail once it's settled.
+- **P3 hazard note (verbatim, to carry into the P3 / generalization section).**
+  > *Coastal DEMs: `mean_slope_tan` (`pipeline.py:204`) reads the raw DEM with no valid mask, so a land
+  > cell adjacent to nodata (clamped to 0, FM-12) reads a spurious cliff that inflates that basin's
+  > slope and score. Masking at the mean does not remove it — the bad value is in the adjacent valid
+  > cell. Before scoring any nodata-adjacent (coastal / patchy) fire, decide the slope term's nodata
+  > contract at source: drop the nodata-adjacent ring, or compute a correct boundary gradient. Until
+  > then the tool has no coastal-slope guarantee and must not present a nodata-adjacent basin's rank as
+  > clean.*
+- **Also parked (not a build reason).** The "honesty-ledger" framing (a boundary flag as a
+  practitioner-facing transparency asset) is retained as a **P3 design note**, not a justification to
+  build unreachable code now.
+- **Frozen-value impact.** None — nothing is changed. Documentation only.
+- **Status.** ~~DEFERRED to P3 (hazard note recorded 2026-07-06)~~ → **BUILT + COMMITTED `ebc1e06`
+  (2026-07-07).** The owner overrode the deferral and shipped the **drop-ring** fix (one of the two
+  "real fixes" named above) plus a synthetic coastal fixture (`tests/test_coastal_slope.py`) that
+  trips the old inflation and proves the fix drops it — directly answering the D0/untestable
+  objection. The open question is resolved: `mean_slope_tan` no longer bypasses `_valid_dem_mask`.
+  Full suite 74 passed at commit; Montecito behavior lock 7/7 byte-identical (inland → no NaN);
+  frozen formula untouched. → FAILURE_MODES **FM-17** (this fix), FM-12 (nodata-to-0 clamp),
+  FM-15/FM-16 (the A25 CRS/CONTOUR guard family that *does* mask), DECISIONS **A18** (burn-side
+  coverage precedent), **A28** (refuse-on-terrain precedent), **A32** (the sibling score-path fail-loud).
+
+---
+
+### A34 — dNBR scoring wired into production (P2.2c): both arms surfaced, Arm A the pre-registered headline, Arm B a non-gating companion
+
+- **Context.** The dNBR path (`reproject_dnbr` / `normalize_dnbr_arm_a` / `normalize_dnbr_arm_b` /
+  `ingest_dnbr_both_arms`) was built + unit-tested but **UNWIRED**: `ingest_burn` hard-refused any
+  non-SBS selection (A29), so production could not score dNBR at all. The coordinate frontend's target
+  population is un-assessed fires, which by definition lack SBS — so the frontend was blocked until the
+  dNBR path ran end-to-end. The P2.3 input-swap test is a documented pre-registered **FAIL**: identical
+  triage rank-AUC 0.9722 across SBS / Arm A / Arm B and 6/6 flowed basins recovered, but the binary
+  "Cold Spring is exactly #1" criterion missed — Arm A ranks San Ysidro #1 (3.314) / Cold Spring #2
+  (3.280), a 1.03% burn-driven margin; Arm B reproduces Cold Spring #1. **n = 1.**
+- **Decision.** Route a dNBR fire (`sbs=None`) through `ingest_dnbr_both_arms` and score **both arms**.
+  **Arm A (binned, the pre-registered primary) is the sole headline ranking; Arm B (continuous
+  companion) rides alongside** as a non-gating column, with per-basin `rank_delta = |rank_A − rank_B|`
+  surfaced as an honest uncertainty signal. Every dNBR artifact carries the framing: triage-validated,
+  **NOT** exact-rank-validated, **n = 1**. The screening spine stays on every artifact (A11).
+- **Explicitly NOT decided (firewall).** Does **not** promote Arm B and does **not** resolve which arm is
+  primary — deferred to a fresh fire (P3/P4). Surfacing both and picking neither respects the
+  pre-registration firewall; crowning B off n = 1 is the goalpost-move the firewall forbids.
+- **Reasoning.** The target fires only have dNBR, so an honest dNBR path is what makes the tool usable at
+  all; the finding establishes dNBR is fit for the tool's actual job (triage / relative ranking) on the
+  validated fire. The SBS branch is left literally untouched, so the Montecito SBS behavior lock stays a
+  true regression detector; the both-arms path is gated against the committed P2.3 side-by-side oracle.
+- **Frozen-value impact.** None — formula, `BURN_WEIGHTS`, `DNBR_BIN_EDGES` / `DNBR_CLAMP` / `DNBR_FLOOR`
+  all untouched. The SBS-vs-dNBR *input routing* sits in `run_pipeline` (per-fire I/O, A30); the
+  coverage-based *selection* (A4/A15) stays inside `ingest_burn`.
+- **Status.** IMPLEMENTED + verified + **COMMITTED `a523dde`** (2026-07-07; labeled "A32" at commit,
+  renamed A32→A34 in code comments in the follow-up `ebc1e06` after discovering the repo already used
+  A32 (empty-mask) + A33 (coastal)). Montecito SBS behavior lock byte-identical (7/7); reproduces the
+  P2.3 oracle (Arm A → San Ysidro #1 3.314339 / Cold Spring #2 3.280250; Arm B → Cold Spring #1;
+  rank-AUC 0.9722 both arms) via `tests/test_dnbr_pipeline.py` **and** the independent
+  `validation/p2_3_swap_test.py`. Resolves the P2.2c / A29 deferred; enables A35 / A36.
+
+---
+
+### A35 — Coordinate-driven acquisition layer (`acquire.py`), outside `src/`
+
+- **Context.** "Coordinates in" requires auto-fetching the DEM + buildings from a bbox. Both capabilities
+  are proven (`validation/p3_acquire_dem.py` = USGS 3DEP 1/3″ COG via `/vsicurl/`;
+  `validation/p3_acquire_assets.py` = OSM via `osmnx`) but each was hardcoded to South Fork's single
+  frozen grid / tile / UTM zone. `src/` is a pure, no-network seam (`ingest.py` bans import-time I/O),
+  so network fetching must not live there.
+- **Decision.** Add **`acquire.py`** at repo root (peer of `run.py`) generalizing the proven scripts to an
+  arbitrary bbox: derive the UTM zone (EPSG:326xx) from the bbox centroid, build a 10 m canonical grid,
+  fetch + mosaic 3DEP + OSM buildings onto it, stage files, and assemble the A30 `fire` dict
+  (`sbs=None`). Network → staged files → pure pipeline. Fail loud (via `GateAbort`, A8) on all-NoData,
+  native-CRS drift, or 0 buildings over a populated AOI. Validate the uploaded dNBR is raw scale
+  (~−2..2), refusing an apparent ×1000 upload (protects the frozen `DNBR_BIN_EDGES`).
+- **Build decisions.** (1) DEM fetch = manual AWS COG `/vsicurl/` + `rasterio.merge`, **not** `py3dep`
+  (not in env; COG is the proven path — zero new dependency). (2) **Building footprints reduced to
+  representative POINTS** (`_buildings_to_points`, centroid in the metric CRS): the pipeline reads
+  `assets.geometry.x/.y` and the validated Montecito assets are Points — a bug the CF-10 end-to-end gate
+  caught (fetch emitted Polygons; South Fork's terrain refusal had hidden it because it refuses before
+  assets are used). ⚠️ The proven `p3_acquire_assets.py` (+ the committed South Fork gpkg) still emit
+  Polygons — dormant (South Fork refuses), flagged not fixed (prior-phase, D0).
+- **Reasoning.** Keeps the pure-`src/` invariant intact while reusing validated code; the A30 `fire` dict
+  is already the exact seam. Porting, not research.
+- **Frozen-value impact.** None — `src/` + all frozen constants untouched (`acquire.py` *reads*
+  `DNBR_CLAMP`, never re-derives it).
+- **Status.** IMPLEMENTED + verified + **COMMITTED** (2026-07-08). Built test-first (`utm_epsg` /
+  `canonical_grid` [CF-6], `tiles_for_bbox` / `fetch_dem` [CF-7], `fetch_buildings` /
+  `_buildings_to_points` [CF-8], `assert_raw_dnbr` / `build_fire_config` [CF-9]). Primary gate:
+  `canonical_grid` reproduces South Fork's frozen grid EXACTLY (EPSG:32613, 966×1439, UL
+  426400.8/3697312.6) from its bbox — corner-point reprojection + `round()` (**not** `transform_bounds`,
+  which bows the box outward and inflates it ~2%). Live-verified: reproduces the committed South Fork DEM
+  grid + elevation range + 633 buildings; end-to-end `build_fire_config` → `run_pipeline` → A27 refusal.
+  `osmnx` pinned (A10/A13). Feeds A30's `run_pipeline(fire)`; consumed by A36.
+
+---
+
+### A36 — Local Streamlit frontend (`app.py`); C2 / D0 / A7 consciously overridden
+
+- **Context.** The tool was CLI-only (`run.py --fire <name>` over pre-staged data); a non-developer could
+  not use it. The decision log schedules only a bare-bones output *viewer* at P5 (A9); anything richer is
+  deferred to outreach O3 (C2); D0 defaults NO to "an elaborate frontend"; A7 says "no backend / no live
+  service."
+- **Decision.** Build a local **Streamlit** app (`app.py`) — a thin UI over `run_pipeline`: draw/enter a
+  bbox, upload a raw dNBR GeoTIFF → `acquire.build_fire_config` (A35) auto-fetches DEM + buildings →
+  dNBR both-arms (A34) → a ranked folium map + `ranking.csv`, or a legible refusal. The owner
+  **explicitly overrides C2 and D0** for this build and reconciles A7: it is a **local, single-user tool
+  that wraps the CLI**, not a hosted service, so A7's "no live service" spirit holds; A1 already
+  sanctions "a small Streamlit app."
+- **Trigger (per D0).** Reduce friction + widen the user base toward outreach O3/O4. A usable demo is a
+  legitimate way to *earn* the O3/O4 ask rather than wait for it. Recorded as a deliberate scope
+  decision, not drift.
+- **Reasoning + cost carried honestly.** The override weakens the "restraint as portfolio signal"
+  argument A9/C2 leaned on; mitigation is to keep `app.py` a deliberately minimal outreach demo, never a
+  product. Every user-facing artifact keeps the screening spine + the A34 n = 1 dNBR framing. Logic lives
+  in pure importable helpers; the UI is in `main()` behind an `if __name__ == "__main__"` guard (testable
+  via `import app` + Streamlit `AppTest`). Results persist in `st.session_state` (an `st_folium` rerun
+  would otherwise wipe them).
+- **Frozen-value impact.** None — Tier-2 UI plumbing; `src/` + all frozen constants untouched.
+- **Status.** IMPLEMENTED + verified + **COMMITTED** (2026-07-08). Verified three ways: unit
+  (`tests/test_app.py` — pure helpers + an `AppTest` smoke test + a rerun-persistence regression test);
+  the **CF-10 end-to-end gate, both paths** (Montecito network e2e → 44 basins ranked + map + CSV; South
+  Fork → legible refusal); full suite green with the behavior lock byte-identical. Owner chose the
+  draw-on-map scope → `streamlit` + `streamlit-folium` pinned. Confidence layer (CF-E): pyflwdir
+  cross-check (per-outlet catchment area Pearson 0.9994 on the scored basins; whole-grid divergence a
+  documented coastal-ocean/edge artifact) + hypothesis property tests locking the frozen scoring
+  invariants. Depends on A34 (dNBR) + A35 (acquire); overrides C2/D0, reconciles A7, invokes A1.
