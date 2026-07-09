@@ -138,3 +138,26 @@ def test_build_fire_config_assembles_a30_dict(tmp_path, monkeypatch):
     assert fire["expected_crs"] == "EPSG:32613"       # zone derived from the bbox centroid
     assert Path(fire["dem"]).exists() and Path(fire["assets"]).exists()   # both staged
     assert "out" in str(fire["out_dir"])
+
+
+# ---- F1: scale-guard robustness (physical bound + undeclared-fill screen) ----------------------
+
+def test_assert_raw_dnbr_passes_undeclared_nodata_sentinel(tmp_path):
+    # A VALID raw dNBR raster whose fill (-9999) is NOT declared as nodata. rasterio read(masked=True)
+    # only masks a DECLARED nodata, so the fill would dominate the 99th percentile and FALSE-REFUSE a
+    # good fire. The guard must screen non-physical fill and judge the scale on the real pixels (F1).
+    raw = np.linspace(-0.5, 1.2, 400, dtype="float32").reshape(20, 20)
+    raw[:, :4] = -9999.0                                    # 20% undeclared fill
+    p = _write_raster(tmp_path / "dnbr_undeclared_fill.tif", raw, nodata=None)
+    stats = assert_raw_dnbr(p)                              # must NOT raise
+    assert stats["p99_abs"] <= 2.0                         # scale judged on the physical pixels only
+
+
+def test_assert_raw_dnbr_rejects_small_mis_scale(tmp_path):
+    # A x3 mis-scale (~ -1.5..3.75) slips a |p99|>5 guard but exceeds the physical dNBR bound [-2,2]
+    # (NBR in [-1,1] -> dNBR in [-2,2]); feeding it to the frozen bins saturates moderate pixels to
+    # High -> a silent, wrong within-fire ranking. Must fail loud, not rescale.
+    raw3 = (np.linspace(-0.5, 1.25, 400, dtype="float32") * 3.0).reshape(20, 20)
+    p = _write_raster(tmp_path / "dnbr_x3.tif", raw3, nodata=None)
+    with pytest.raises(GateAbort):
+        assert_raw_dnbr(p)

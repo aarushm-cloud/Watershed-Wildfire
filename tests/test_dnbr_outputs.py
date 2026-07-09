@@ -62,3 +62,16 @@ def test_dnbr_csv_headline_is_arm_a_and_rank_delta_flags_disagreement(tmp_path):
     # rows are ordered by the Arm A headline rank
     ranks = [int(r["rank"]) for r in rows]
     assert ranks == sorted(ranks)
+
+
+def test_dnbr_csv_and_geojson_carry_slope_coverage_flag(tmp_path):
+    """F4: the slope-coverage flag (a basin scored on a small non-nodata-ring remnant) travels on the
+    dNBR CSV and GeoJSON. Montecito is inland (fully covered, flag False), so this asserts the COLUMN
+    is PRESENT -- a coastal fire's flagged basins must be surfaced, never silently ranked."""
+    import json
+    csv_path, gj_path = _run_and_write(tmp_path)
+    _, rows = _read_rows(csv_path)
+    assert "low_slope_coverage" in rows[0] and "slope_coverage_frac" in rows[0]
+    fc = json.loads(Path(gj_path).read_text())
+    props0 = fc["features"][0]["properties"]
+    assert "low_slope_coverage" in props0 and "slope_coverage_frac" in props0

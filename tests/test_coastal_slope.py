@@ -88,3 +88,38 @@ def test_stage_2e_score_means_over_clean_slope_cells():
         assert False, "expected GateAbort on an all-NaN-slope basin"
     except GateAbort:
         pass
+
+
+def test_stage_2e_score_flags_low_slope_coverage_when_ring_dominates():
+    """F4: a basin mostly on the dropped nodata ring is scored on its small clean remnant -> FLAGGED
+    low_slope_coverage, not silently ranked as if fully sampled (mirrors burn's low_coverage). The
+    score/mean still come from the clean cells only -- the flag is diagnostic, it never gates the rank."""
+    from src.score import stage_2e_score
+    shape = (4, 4)
+    wt = np.ones(shape)
+    covered = np.ones(shape, dtype=bool)
+    slope = np.full(shape, 0.2)
+    slope[0, :] = np.nan                               # top row = dropped nodata ring
+    m = np.zeros(shape, dtype=bool)
+    m[0:2, 0:2] = True                                # basin: 2 NaN (ring) + 2 clean -> 50% coverage
+    basins = [{"basin_id": 0, "mask": m, "area_km2": 1.0}]
+    stage_2e_score(wt, covered, slope, basins)
+    assert abs(basins[0]["slope_coverage_frac"] - 0.5) < 1e-9
+    assert basins[0]["low_slope_coverage"] is True     # < 0.80 -> flagged
+    assert abs(basins[0]["mean_slope"] - 0.2) < 1e-9   # mean still over the clean cells (unchanged)
+
+
+def test_stage_2e_score_clean_basin_full_slope_coverage():
+    """F4: an inland basin (no dropped ring) reports full slope coverage and is NOT flagged -- so the
+    Montecito behavior lock is untouched (its basins are all fully covered, frac == 1.0)."""
+    from src.score import stage_2e_score
+    shape = (4, 4)
+    wt = np.ones(shape)
+    covered = np.ones(shape, dtype=bool)
+    slope = np.full(shape, 0.2)
+    m = np.zeros(shape, dtype=bool)
+    m[0:2, 0:2] = True                                # all clean
+    basins = [{"basin_id": 0, "mask": m, "area_km2": 1.0}]
+    stage_2e_score(wt, covered, slope, basins)
+    assert basins[0]["slope_coverage_frac"] == 1.0
+    assert basins[0]["low_slope_coverage"] is False

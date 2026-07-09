@@ -44,10 +44,16 @@ CELL_M = 10.0   # canonical analysis resolution (m); matches src.config.CELL_M (
 _3DEP_COG = ("https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/"
              "{tile}/USGS_13_{tile}.tif")
 DEM_NODATA = -9999.0
-# CF-9 raw-scale guard threshold (plumbing, NOT a frozen science value): raw dNBR is physically
-# ~[-2, 2]; a x1000-distributed raster is ~[-1300, 1300]. Anything above this 99th-pct |dNBR| is an
-# apparent x1000 upload -> refuse (never silently rescale). Chosen to sit in the wide empty gap.
-DNBR_RAW_MAX_ABS = 5.0
+# CF-9 raw-scale guard thresholds (plumbing that PROTECTS the frozen raw bins, NOT frozen-science
+# values). raw dNBR is physically bounded: NBR = (NIR-SWIR)/(NIR+SWIR) is a normalized ratio in
+# [-1, 1], so dNBR = NBR_pre - NBR_post is in [-2, 2]; the vault's typical raw range is ~[-0.5, 1.3]
+# (DATA_SOURCES S2 / science_reference S6). A 99th-pct |dNBR| above the physical ceiling is an apparent
+# scale error (x1000, x-N, or an RdNBR upload) -> refuse (never silently rescale).
+DNBR_RAW_MAX_ABS = 2.0    # physical dNBR ceiling |dNBR| <= 2 (F1); above this the upload is mis-scaled
+# |v| above this is an obvious NoData/FILL sentinel (-9999, 3.4e38, 65535, ...), not dNBR at ANY
+# conventional scale (even x1000 dNBR tops out ~1300). Screened BEFORE the scale check so an UNDECLARED
+# nodata (read(masked=True) honors only a DECLARED nodata) can't false-refuse a valid raw raster.
+DNBR_FILL_ABS = 5000.0
 
 
 def _norm_epsg(crs) -> str:
@@ -241,29 +247,43 @@ def fetch_buildings(bbox, dst_crs, out_path, *, buf_deg: float = 0.012):
 # ---- CF-9: dNBR raw-scale guard + A30 fire-config assembly -------------------------------------
 
 def assert_raw_dnbr(dnbr_path) -> dict:
-    """Guard (Tier-1-adjacent): the uploaded dNBR MUST be raw scale, because the pipeline's frozen
-    bins (src.config.DNBR_BIN_EDGES / DNBR_CLAMP) are defined on RAW dNBR. If the 99th-pct |dNBR|
-    exceeds DNBR_RAW_MAX_ABS it is an apparent x1000 upload -> fail loud (A8); acquire never silently
-    rescales (the anti-fitting spine: a wrong-scale input would misclassify every pixel). Returns
-    stats for the manifest. Raises on all-NoData too.
+    """Guard (Tier-1-adjacent): the uploaded dNBR MUST be raw scale, because the pipeline's frozen bins
+    (src.config.DNBR_BIN_EDGES / DNBR_CLAMP) are defined on RAW dNBR. dNBR is physically bounded to
+    [-2, 2] (NBR = (NIR-SWIR)/(NIR+SWIR) in [-1,1]); the vault's typical raw range is ~[-0.5, 1.3]. So a
+    99th-pct |dNBR| above DNBR_RAW_MAX_ABS (=2.0) is an apparent scale error (x1000, x-N, or an RdNBR
+    upload) -> fail loud (A8); acquire NEVER silently rescales (a wrong-scale input would misclassify
+    every pixel). Obvious NoData/fill sentinels (|v| > DNBR_FILL_ABS) are SCREENED first, so an
+    UNDECLARED nodata (which read(masked=True) does NOT mask) can't false-refuse a valid raw raster.
+    Returns stats for the manifest. Raises on all-NoData / all-sentinel too.
     """
     with rasterio.open(dnbr_path) as ds:
-        band = ds.read(1, masked=True)
+        band = ds.read(1, masked=True)          # masks only a DECLARED nodata
+        total = ds.width * ds.height            # captured here -- no second open (was a duplicate)
     finite = np.asarray(band.compressed(), dtype="float64")
     finite = finite[np.isfinite(finite)]
     if finite.size == 0:
         raise GateAbort(f"FAIL: uploaded dNBR {Path(dnbr_path).name} has no valid pixels (A8).")
-    p99_abs = float(np.percentile(np.abs(finite), 99))
+    # Screen obvious fill sentinels (undeclared -9999 / 3.4e38 / 65535 ...) BEFORE judging the scale --
+    # not dNBR at any conventional scale (even x1000 tops out ~1300). Excluded from the scale stats but
+    # COUNTED (they lower valid_frac); never silently treated as burn data.
+    sentinel = np.abs(finite) > DNBR_FILL_ABS
+    n_sentinel = int(sentinel.sum())
+    physical = finite[~sentinel]
+    if physical.size == 0:
+        raise GateAbort(f"FAIL: uploaded dNBR {Path(dnbr_path).name}: every valid pixel is a fill "
+                        f"sentinel (|dNBR| > {DNBR_FILL_ABS:.0f}); no real dNBR data (A8).")
+    p99_abs = float(np.percentile(np.abs(physical), 99))
     if p99_abs > DNBR_RAW_MAX_ABS:
         lo, hi = DNBR_CLAMP
+        detail = (f"looks x1000-scaled (99th-pct |dNBR| = {p99_abs:.0f}); divide by 1000 and re-upload"
+                  if p99_abs > 50.0 else
+                  f"exceeds the physical dNBR range [-2, 2] (99th-pct |dNBR| = {p99_abs:.2f}); check the "
+                  f"scale/units -- is this raw dNBR, not an RdNBR or otherwise-scaled product?")
         raise GateAbort(
-            f"FAIL: uploaded dNBR looks x1000-scaled (99th-pct |dNBR| = {p99_abs:.0f}); the pipeline's "
-            f"frozen bins are RAW dNBR (clamp {lo}..{hi}). Divide by 1000 and re-upload -- acquire will "
-            f"NOT silently rescale (A8; DATA_SOURCES S2 scale gotcha).")
-    with rasterio.open(dnbr_path) as ds:
-        total = ds.width * ds.height
-    return {"p99_abs": round(p99_abs, 4), "min": float(finite.min()), "max": float(finite.max()),
-            "valid_frac": round(float(finite.size / total), 4)}
+            f"FAIL: uploaded dNBR {detail}. The pipeline's frozen bins are RAW dNBR (clamp {lo}..{hi}); "
+            f"acquire will NOT silently rescale (A8; DATA_SOURCES S2 scale gotcha).")
+    return {"p99_abs": round(p99_abs, 4), "min": float(physical.min()), "max": float(physical.max()),
+            "valid_frac": round(float(physical.size / total), 4), "n_fill_sentinel": n_sentinel}
 
 
 def build_fire_config(bbox, dnbr_path, out_dir, name: str = "fire", *, buf_deg: float = 0.012) -> dict:

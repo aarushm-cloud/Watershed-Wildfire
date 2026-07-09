@@ -67,3 +67,30 @@ def test_dnbr_headline_mirrors_arm_a():
     R = run_pipeline(MONTECITO_DNBR_FIRE)
     assert R["ranked"][0]["basin_id"] == SAN_YSIDRO_ID
     assert R["metrics"]["auc"] == R["arms"]["arm_a"]["metrics"]["auc"]
+
+
+def test_dnbr_nodata_flags_surfaces_over_threshold_without_raising():
+    """F3 (B+): _dnbr_nodata_flags is the loud-but-NON-FATAL companion to the hard NoData guard. It
+    returns the (basin_id, frac) of basins whose dNBR NoData exceeds the fail-loud fraction and NEVER
+    raises -- the surfacing that keeps the flowed-only guard from silently under-scoring a clouded
+    (non-flowed) basin (NoData -> class 15 -> low burn)."""
+    import numpy as np
+    from src.pipeline import _dnbr_nodata_flags
+    from src.config import DNBR_NODATA_FAILLOUD_FRAC
+    shape = (4, 4)
+    nodata_mask = np.zeros(shape, dtype=bool)
+    nodata_mask[0, :] = True                                 # top row is NoData
+    clean = np.zeros(shape, dtype=bool); clean[2:4, 0:2] = True      # 0% nodata
+    clouded = np.zeros(shape, dtype=bool); clouded[0:2, 0:2] = True  # 2 of 4 cells NoData -> 50% (> 20%)
+    basins = [{"basin_id": 5, "mask": clean}, {"basin_id": 7, "mask": clouded}]
+    over = _dnbr_nodata_flags(basins, nodata_mask)           # must NOT raise
+    ids = [bid for bid, frac in over]
+    assert 7 in ids and 5 not in ids                         # only the clouded basin is flagged
+    assert all(frac > DNBR_NODATA_FAILLOUD_FRAC for _, frac in over)
+
+
+def test_montecito_dnbr_run_surfaces_nodata_warn_list():
+    """F3 (B+): the run threads the non-fatal NoData warning into the result diag. Montecito's raster is
+    NoData-clean, so the list is empty -- but the KEY must exist so a future clouded fire is surfaced."""
+    R = run_pipeline(MONTECITO_DNBR_FIRE)
+    assert R["dnbr_diag"]["nodata_warn_basins"] == []

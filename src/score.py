@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.config import BURN_LOW_COVERAGE
+from src.config import BURN_LOW_COVERAGE, SLOPE_LOW_COVERAGE
 from src.grids import GateAbort
 
 
@@ -64,7 +64,11 @@ def stage_2e_score(wt, covered, slope, basins):
                 f"basin {b['basin_id']}: every slope cell is nodata-contaminated (dropped ring) -- the "
                 f"basin sits entirely on the FM-12 nodata edge; refusing a nan score (A33/A8 fail-loud)."
             )
-        b["mean_slope"] = float(np.mean(sl))                             # tan(theta), dimensionless
+        b["mean_slope"] = float(np.mean(sl))                             # tan(theta), over the CLEAN cells
+        # F4: fraction of basin cells with a clean (non-nodata-ring) slope -- flags a basin scored on a
+        # small remnant (mirrors low_coverage). Diagnostic only; never gates score/rank. Inland -> 1.0.
+        b["slope_coverage_frac"] = sl.size / ncells
+        b["low_slope_coverage"] = b["slope_coverage_frac"] < SLOPE_LOW_COVERAGE
         b["score"] = b["mean_burn"] * b["mean_slope"] * b["area_km2"]    # burn[0-1] x slope[tan] x km^2
         b["low_coverage"] = b["burn_coverage_frac"] < BURN_LOW_COVERAGE
 

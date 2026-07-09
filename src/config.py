@@ -44,6 +44,7 @@ DNBR_NODATA_FAILLOUD_FRAC = 0.20
 # NoData(15) map to 0.0 and are INCLUDED in the denominator (coverage-weighted). Faithful to
 # VALIDATION_REPORT s2 "(unburned/outside-perimeter -> 0)"; reproduces flowed_mean=1.619, AUC ~0.972.
 BURN_LOW_COVERAGE = 0.80      # flag basins with < this fraction of SBS-covered cells (C8 caveat)
+SLOPE_LOW_COVERAGE = 0.80     # F4: flag basins with < this fraction of clean (non-nodata-ring) slope cells
 
 # --- canonical grid (the validation case CRS; metres) ---
 CANONICAL_CRS  = "EPSG:32611"   # Montecito/UTM-11N validation zone; the PER-FIRE DEFAULT (A25)

@@ -212,6 +212,8 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
             "rank_delta": abs(a["rank"] - b["rank"]),                    # honest uncertainty flag
             "mean_burn_a": round(a["mean_burn"], 4), "mean_burn_b": round(b["mean_burn"], 4),
             "mean_slope": round(a["mean_slope"], 4),                     # identical across arms (terrain)
+            "slope_coverage_frac": round(a["slope_coverage_frac"], 4),   # F4: clean (non-nodata-ring) fraction
+            "low_slope_coverage": a["low_slope_coverage"],               # F4: flagged if scored on a small remnant
             "area_km2": round(a["area_km2"], 4),                         # identical across arms (delineation)
             "burn_coverage_frac": round(a["burn_coverage_frac"], 4),    # Arm A operational (A23)
             "low_coverage": a["low_coverage"],
@@ -243,6 +245,8 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
                       "rank_delta": abs(a["rank"] - b["rank"]),
                       "mean_burn_a": round(a["mean_burn"], 4), "mean_burn_b": round(b["mean_burn"], 4),
                       "mean_slope": round(a["mean_slope"], 4), "area_km2": round(a["area_km2"], 4),
+                      "slope_coverage_frac": round(a["slope_coverage_frac"], 4),   # F4
+                      "low_slope_coverage": a["low_slope_coverage"],               # F4
                       "burn_coverage_frac": round(a["burn_coverage_frac"], 4),
                       "flowed": a.get("flowed", False), "matched_creek": a.get("matched_creek", ""),
                       "burn_source": "dNBR", "screening": SCREENING_STATEMENT})

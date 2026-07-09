@@ -26,6 +26,7 @@ All distances are metric. Fail loud, never degrade (FM-10). See DECISIONS A16/A2
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -61,6 +62,8 @@ from src.delineate import (stage_2b_outlets, stage_2c_delineate, assert_contour_
 from src.score import stage_2e_score
 # Refusal artifact + human message (src/outputs.py); the A27 gate writes refusal.json via these.
 from src.outputs import write_refusal, build_refusal_message
+
+_log = logging.getLogger(__name__)
 
 # CELL_AREA_KM2 is a DERIVATION of CELL_M (m^2 per cell -> km^2), not a standalone tunable;
 # per the P1.1 named-binding rule it stays computed here at its use-site from the imported
@@ -418,6 +421,22 @@ def _dnbr_nodata_guard(basins, nodata_mask):
                 "-- a clouded scene is a bad scene, not a low-burn finding (P2.1 §4 path 1, A8).")
 
 
+def _dnbr_nodata_flags(basins, nodata_mask):
+    """F3 (B+): the NON-FATAL companion to _dnbr_nodata_guard. Returns [(basin_id, frac), ...] for basins
+    whose dNBR NoData fraction exceeds DNBR_NODATA_FAILLOUD_FRAC, and NEVER raises. Surfaces (loud but
+    non-fatal) the non-flowed scored basins the flowed-only guard does not hard-abort on a truth-bearing
+    fire, so a clouded basin under-scored as low-burn is never SILENT (A8 spine: the sin is silence)."""
+    nd = np.asarray(nodata_mask)
+    over = []
+    for b in basins:
+        m = b["mask"]
+        ncells = int(m.sum())
+        frac = float(nd[m].mean()) if ncells else 0.0
+        if frac > DNBR_NODATA_FAILLOUD_FRAC:
+            over.append((b["basin_id"], frac))
+    return over
+
+
 def _attach_a23_covered_interp(basins, covered_interp):
     """A23 diagnostic: per-basin covered-INTERPRETATION fraction (below-floor counted as covered) --
     READ-ONLY, never fed to low_coverage/score/rank (score.py untouched). Faithful to
@@ -522,14 +541,25 @@ def run_pipeline(fire=None):
         raise GateAbort("run_pipeline: fire provides neither 'sbs' nor 'dnbr' -- no burn input (A8 fail-loud).")
     D = ingest_dnbr_both_arms(dnbr_path, dem_artifacts["profile"])    # both arms, reprojected+aligned to the DEM grid
 
-    # dNBR NoData/cloud fail-loud guard (A8; P2.1 §4 path 1): flowed (truth) basins when creeks exist
-    # (P2.3-harness parity), else ALL basins. The flowed set is score-independent (creek match <= TRUTH_MATCH_M).
+    # dNBR NoData/cloud guard (A8; P2.1 §4 path 1). HARD abort on the guarded set: flowed (truth) basins
+    # when creeks exist (P2.3-harness parity, byte-identical), else ALL scored basins (a real frontend fire
+    # has creeks=None -> every basin guarded). The flowed set is score-independent (creek match <= TRUTH_MATCH_M).
     if creek_nearest is not None:
         flowed_ids = {info["basin_id"] for info in creek_nearest.values() if info["dist_m"] <= TRUTH_MATCH_M}
         guard_basins = [b for b in basins if b["basin_id"] in flowed_ids]
+        unguarded_basins = [b for b in basins if b["basin_id"] not in flowed_ids]
     else:
-        guard_basins = basins
+        guard_basins, unguarded_basins = basins, []
     _dnbr_nodata_guard(guard_basins, D["nodata_mask"])
+    # F3 (B+): the flowed-only scope leaves non-flowed scored basins un-hard-guarded on a truth-bearing
+    # fire; a clouded one is under-scored (NoData -> class 15 -> low burn). Surface it LOUD but NON-FATAL
+    # (never silent, A8) so a future P4 truth fire is flagged. Empty on a frontend fire (all guarded above).
+    nodata_warn = _dnbr_nodata_flags(unguarded_basins, D["nodata_mask"])
+    if nodata_warn:
+        _log.warning("dNBR NoData > %.0f%% on %d unguarded non-flowed basin(s) %s -- ranks may be "
+                     "under-scored (cloud read as low burn); NOT aborted (flowed-only P2.3 parity). A P4 "
+                     "truth fire must widen the guard or pre-screen the scene.",
+                     DNBR_NODATA_FAILLOUD_FRAC * 100, len(nodata_warn), [bid for bid, _ in nodata_warn])
 
     # Score BOTH arms on independent copies of the burn-independent delineation (A34). Arm A (binned) is
     # the pre-registered headline; Arm B (continuous) is the non-gating companion. slope + area are identical
@@ -543,7 +573,7 @@ def run_pipeline(fire=None):
             "provenance": provenance, "creeks": creeks, "creek_nearest": creek_nearest,
             "arms": {"arm_a": arm_a, "arm_b": arm_b}, "headline_arm": "arm_a",
             "dnbr_diag": {"valid": D["valid"], "nodata_mask": D["nodata_mask"],
-                          "covered_interp": D["covered_interp"]},
+                          "covered_interp": D["covered_interp"], "nodata_warn_basins": nodata_warn},
             # Arm A (headline) mirrored at top level so uniform consumers (run.py, viewers) work unchanged:
             "basins": arm_a["basins"], "ranked": arm_a["ranked"],
             "n_ties": arm_a["n_ties"], "metrics": arm_a["metrics"]}
