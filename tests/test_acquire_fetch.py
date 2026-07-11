@@ -270,6 +270,24 @@ def test_fetch_dem_translates_merge_failure_to_gateabort(tmp_path, monkeypatch):
     assert isinstance(e.value.__cause__, RasterioIOError)
 
 
+def test_fetch_dem_refuses_non_nad83_tile_crs(tmp_path, monkeypatch):
+    # F11 residual: the native-CRS-drift guard (a 3DEP tile whose CRS is not EPSG:4269/4326 -- a
+    # vintage/product drift) must fail loud, never silently warp. This branch was previously untested.
+    class _FakeDS:
+        crs = "EPSG:3857"   # Web Mercator -- NOT NAD83/WGS84 geographic
+        nodata = None
+        def close(self):
+            pass
+
+    monkeypatch.setattr(rasterio, "open", lambda *a, **k: _FakeDS())
+    from acquire import canonical_grid, fetch_dem
+    bbox = (-105.7916, 33.3255, -105.6361, 33.4135)
+    grid = canonical_grid(*bbox)
+    with pytest.raises(GateAbort) as e:
+        fetch_dem(bbox, grid, tmp_path / "dem.tif")
+    assert "3857" in str(e.value) and "NAD83" in str(e.value)
+
+
 def test_fetch_dem_translates_crs_mismatch_to_gateabort(tmp_path, monkeypatch):
     # round-2/[2]: merge() raises a BARE RasterioError (not a RasterioIOError) on an inter-tile CRS
     # mismatch -- both a 4269 and a 4326 tile pass the per-tile allowlist, then merge rejects the mix.

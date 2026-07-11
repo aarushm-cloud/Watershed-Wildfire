@@ -182,7 +182,8 @@ def run_screening(bbox_raw, dnbr_file, *, name="frontend"):
             csv_path, gj_path = write_dnbr_outputs(
                 result["arms"]["arm_a"], result["arms"]["arm_b"], result["creek_nearest"],
                 fire["out_dir"], fire["dem"],
-                validation_case=f"{fire['name']} (coordinate entry, dNBR both-arms)")
+                validation_case=f"{fire['name']} (coordinate entry, dNBR both-arms)",
+                zone=result.get("zone"))   # F2: the downloaded CSV carries the FINDING caveat too
             try:
                 fc = json.loads(Path(gj_path).read_text())
             except json.JSONDecodeError as e:   # a truncated geojson WE wrote is an internal fault, not
@@ -190,7 +191,7 @@ def run_screening(bbox_raw, dnbr_file, *, name="frontend"):
                 # render the cryptic JSONDecodeError verbatim through the domain-message catch below.
                 raise RuntimeError(f"wrote an unreadable basins.geojson at {gj_path}: {e}") from e
             return {"kind": "ranked", "n": view["n_basins"], "fc": fc,
-                    "csv": Path(csv_path).read_bytes()}
+                    "csv": Path(csv_path).read_bytes(), "zone": result.get("zone")}   # F2
         if view["kind"] == "refused":
             return {"kind": "refused", "message": view["message"]}
         return {"kind": "error", "message": view.get("message", "Unexpected pipeline result.")}
@@ -304,6 +305,12 @@ def main():
     if screen.get("inputs") != inputs_key:
         st.warning("**Inputs changed since this result was produced** -- the box/upload above no "
                    "longer match what is shown below. Click **Run screening** to re-screen.")
+    # F2: a FINDING master-outlet delineation (whole-AOI area outside the +/-15% validated band) is a
+    # low-confidence signal -- surface it loudly on the ranked view, never a silent confident ranking.
+    if screen.get("zone") == "FINDING":
+        st.warning("**Low-confidence delineation (master-outlet zone = FINDING).** The whole-AOI "
+                   "drainage area is order-of-magnitude sane but outside the +/-15% validated band, so "
+                   "the basin delineation -- and this ranking -- should be treated as low-confidence.")
     if screen["kind"] == "error":
         st.error(f"Could not screen this area: {screen['message']}")
         return

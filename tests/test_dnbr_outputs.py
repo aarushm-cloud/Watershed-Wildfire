@@ -8,8 +8,11 @@ two burn methods disagree = rank uncertain). Every artifact carries the screenin
 from __future__ import annotations
 
 import csv
+import json
 import sys
 from pathlib import Path
+
+import pytest
 
 _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
@@ -19,12 +22,46 @@ from src.pipeline import run_pipeline, MONTECITO_DNBR_FIRE
 from src.outputs import write_dnbr_outputs
 
 
-def _run_and_write(tmp_path):
+def _run_and_write(tmp_path, zone=None):
     R = run_pipeline(MONTECITO_DNBR_FIRE)
     csv_path, gj_path = write_dnbr_outputs(
         R["arms"]["arm_a"], R["arms"]["arm_b"], R["creek_nearest"], tmp_path,
-        MONTECITO_DNBR_FIRE["dem"], MONTECITO_DNBR_FIRE["validation_case"])
+        MONTECITO_DNBR_FIRE["dem"], MONTECITO_DNBR_FIRE["validation_case"], zone=zone)
     return csv_path, gj_path
+
+
+def test_write_dnbr_outputs_fails_loud_on_zero_basins(tmp_path):
+    # F9: a 0-basin result must NOT silently emit an empty CSV/GeoJSON (indistinguishable from a broken
+    # delineation) -- refuse loudly (A8). ValueError, not GateAbort, so the pure-serialization sink
+    # keeps its no-project-imports design; run_screening + the CLI still surface it legibly.
+    empty = {"basins": [], "ranked": []}
+    with pytest.raises(ValueError) as e:
+        write_dnbr_outputs(empty, empty, None, tmp_path, "/nonexistent/dem.tif")
+    assert "0 basins" in str(e.value)
+
+
+def test_write_outputs_fails_loud_on_zero_basins(tmp_path):
+    from src.outputs import write_outputs
+    with pytest.raises(ValueError) as e:
+        write_outputs([], {}, tmp_path, "/nonexistent/dem.tif", "SBS")
+    assert "0 basins" in str(e.value)
+
+
+def test_write_dnbr_outputs_surfaces_finding_zone(tmp_path):
+    # F2: a FINDING master-outlet zone (order-of-magnitude sane but outside the +/-15% validated band)
+    # must travel on the artifact as a loud caveat + a provenance stamp, not proceed silently.
+    csv_path, gj_path = _run_and_write(tmp_path, zone="FINDING")
+    htext = "".join(_read_rows(csv_path)[0]).lower()
+    assert "master" in htext and "low-confidence" in htext
+    fc = json.loads(Path(gj_path).read_text())
+    assert fc["provenance"]["master_zone"] == "FINDING"
+
+
+def test_write_dnbr_outputs_pass_zone_no_caveat(tmp_path):
+    csv_path, gj_path = _run_and_write(tmp_path, zone="PASS")
+    assert "low-confidence" not in "".join(_read_rows(csv_path)[0]).lower()
+    fc = json.loads(Path(gj_path).read_text())
+    assert fc["provenance"]["master_zone"] == "PASS"
 
 
 def _read_rows(csv_path):

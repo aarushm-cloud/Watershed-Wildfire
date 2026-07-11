@@ -112,6 +112,10 @@ def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source,
     (read-only, from ingest via gate); validation_case -- per-fire provenance stamp (A30), defaulting
     to the Montecito case so the no-kwarg call is byte-identical. SCREENING_STATEMENT is this module's
     constant."""
+    if not basins:                                     # F9: never emit an empty artifact (A8 fail-loud)
+        raise ValueError("write_outputs: refusing to write outputs for 0 basins -- the delineation "
+                         "produced none; an empty ranking is indistinguishable from a broken run "
+                         "(A8 fail-loud).")
     out_dir.mkdir(parents=True, exist_ok=True)
     nearest_by_basin = {}
     for creek, info in creek_nearest.items():
@@ -179,7 +183,7 @@ DNBR_FRAMING = (
 
 
 def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
-                       validation_case="Thomas_Fire_2017/Montecito_2018 (dNBR both-arms)"):
+                       validation_case="Thomas_Fire_2017/Montecito_2018 (dNBR both-arms)", zone=None):
     """Write {out_dir}/{ranking.csv, basins.geojson} for the dNBR BOTH-ARMS path (A34/P2.2c).
 
     Arm A (binned) is the headline ranking (rank/score); Arm B (continuous) rides alongside
@@ -189,7 +193,13 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
 
     arm_a / arm_b -- the per-arm dicts from run_pipeline (each carries 'basins' scored + 'ranked').
     creek_nearest -- per-creek nearest-outlet info, or None (a real fire with no truth-creek layer).
-    out_dir -- output dir; dem_tif -- DEM path for the GeoJSON transform/CRS re-open (A25)."""
+    out_dir -- output dir; dem_tif -- DEM path for the GeoJSON transform/CRS re-open (A25). zone -- the
+    master-outlet delineation zone (classify_master_zone: PASS/FINDING); a FINDING is stamped as a loud
+    low-confidence caveat (F2), None omits it (byte-identical to the pre-F2 call)."""
+    if not arm_a["basins"]:                            # F9: never emit an empty artifact (A8 fail-loud)
+        raise ValueError("write_dnbr_outputs: refusing to write outputs for 0 basins -- the "
+                         "delineation produced none; an empty ranking is indistinguishable from a "
+                         "broken run (A8 fail-loud).")
     out_dir.mkdir(parents=True, exist_ok=True)
     b_by = {b["basin_id"]: b for b in arm_b["basins"]}
 
@@ -226,6 +236,10 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
         fh.write(f"# {SCREENING_STATEMENT}\n")
         fh.write(f"# {DNBR_FRAMING}\n")
         fh.write(f"# burn_source=dNBR  validation_case={validation_case}\n")
+        if zone is not None and zone != "PASS":        # F2: surface a FINDING master-zone loudly
+            fh.write(f"# WARNING master_zone={zone}: the whole-AOI pour-point (master-outlet) area is "
+                     "order-of-magnitude sane but OUTSIDE the +/-15% validated band -- the delineation, "
+                     "and therefore this ranking, is LOW-CONFIDENCE (A8/A11; FM-1).\n")
         df.to_csv(fh, index=False)
 
     # basins.geojson: vectorise each Arm A basin mask, reproject to EPSG:4326, both-arm properties.
@@ -257,7 +271,7 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
         fc = json.load(fh)
     fc["provenance"] = {"burn_source": "dNBR", "screening": SCREENING_STATEMENT,
                         "dnbr_framing": DNBR_FRAMING, "headline_arm": "arm_a (binned)",
-                        "companion_arm": "arm_b (continuous)",
+                        "companion_arm": "arm_b (continuous)", "master_zone": zone,   # F2
                         "validation_case": validation_case, "crs": "EPSG:4326"}
     with open(gj_path, "w") as fh:
         json.dump(fc, fh)
