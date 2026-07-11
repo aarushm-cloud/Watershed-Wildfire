@@ -45,7 +45,7 @@ The validation case runs on a fixed canonical grid (EPSG:32611, 1413 × 1295 cel
 **Caveats carried forward, not buried:**
 
 - **n = 1 event.** The method is validated as a *ranker* on *one fire*. Transferability to other ranges, rain regimes, and fire types is unestablished. A second validation event in a different region/regime is planned before any transferability claim.
-- **dNBR is the production default but is validated only on SBS.** All validation evidence above is on BAER SBS. A dNBR input-swap test on the same Montecito case is the gate that validates the default path (see [Roadmap](#roadmap)).
+- **dNBR is the production default but is validated only on SBS.** All validation evidence above is on BAER SBS. A dNBR input-swap test on the same Montecito case is the gate that validates the default path.
 - **Scores are within-fire and ordinal only** — see [What it is NOT](#what-it-is-not).
 
 ---
@@ -167,21 +167,6 @@ A fire runs through a single entrypoint — `python run.py --fire <name>` — wh
 
 ---
 
-## Roadmap
-
-The method is validated; the work is turning the validation script into a clean, reproducible, non-developer-runnable pipeline.
-
-- [x] **Method validated** on Thomas / Montecito (top-tercile recovery, Cold Spring #1)
-- [ ] **Reconstruct the validation gate** against the frozen behavior oracle *(in progress)*
-- [ ] **Refactor into the seven-module pipeline** with a behavior-lock test reproducing the validated ranking order
-- [ ] **dNBR input-path validation** — re-run the Montecito case with dNBR instead of SBS; confirm the ranking survives the input swap, or learn cheaply that it doesn't
-- [ ] **Generalization** — run on a fresh un-assessed fire; fail loud on non-Montecito-shaped inputs rather than degrading silently
-- [ ] **Second validation event** — a different region/regime, to probe transferability
-- [ ] **Bare-bones viewer + handoff docs** — static map + per-basin score breakdown, runnable by a non-developer
-- [ ] **Inundation / runout layer** — *quarantined research extension, explicitly not on the critical path.* Never confident polygons over homes. Default answer is no until there is a validated reason to build it.
-
----
-
 ## Tech stack
 
 Pure-Python pipeline, installed via conda (the reliable path for the GDAL/GEOS/PROJ-backed geospatial stack):
@@ -204,4 +189,4 @@ Outputs are a **within-fire relative ranking of watersheds to assess first** —
 
 ## License
 
-_To be added._
+Released under the [MIT License](LICENSE).
