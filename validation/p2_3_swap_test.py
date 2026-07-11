@@ -123,7 +123,7 @@ def main():
     # NoData/cloud fail-loud guard on flowed basins (P2.1 §4 path 1; A8).
     nd_fracs = p2run._nodata_fail_loud_guard(cbasins, D["nodata_mask"])
 
-    slope = gate.mean_slope_tan(control["hydro"]["dem_raw"])
+    slope = gate.mean_slope_tan(control["hydro"]["dem_raw"], control["hydro"]["dem_nodata"])   # match production (A33 drop-ring)
     a_ranked, a_basins = _build_arm(cbasins, D, "arm_a", slope)
     b_ranked, b_basins = _build_arm(cbasins, D, "arm_b", slope)
 

@@ -36,7 +36,7 @@ def test_write_dnbr_outputs_fails_loud_on_zero_basins(tmp_path):
     # keeps its no-project-imports design; run_screening + the CLI still surface it legibly.
     empty = {"basins": [], "ranked": []}
     with pytest.raises(ValueError) as e:
-        write_dnbr_outputs(empty, empty, None, tmp_path, "/nonexistent/dem.tif")
+        write_dnbr_outputs(empty, empty, None, tmp_path, "/nonexistent/dem.tif", "test-fire")
     assert "0 basins" in str(e.value)
 
 
@@ -55,6 +55,14 @@ def test_write_dnbr_outputs_surfaces_finding_zone(tmp_path):
     assert "master" in htext and "low-confidence" in htext
     fc = json.loads(Path(gj_path).read_text())
     assert fc["provenance"]["master_zone"] == "FINDING"
+
+
+def test_dnbr_geojson_carries_low_coverage(tmp_path):
+    # minor: the dNBR GeoJSON omitted the burn low_coverage flag (CSV-only), so a map consumer could
+    # not surface the A18 caveat. It must appear in the feature properties.
+    _, gj_path = _run_and_write(tmp_path)
+    fc = json.loads(Path(gj_path).read_text())
+    assert "low_coverage" in fc["features"][0]["properties"]
 
 
 def test_write_dnbr_outputs_pass_zone_no_caveat(tmp_path):

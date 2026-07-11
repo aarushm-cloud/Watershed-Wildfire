@@ -183,7 +183,7 @@ DNBR_FRAMING = (
 
 
 def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
-                       validation_case="Thomas_Fire_2017/Montecito_2018 (dNBR both-arms)", zone=None):
+                       validation_case, zone=None):
     """Write {out_dir}/{ranking.csv, basins.geojson} for the dNBR BOTH-ARMS path (A34/P2.2c).
 
     Arm A (binned) is the headline ranking (rank/score); Arm B (continuous) rides alongside
@@ -192,7 +192,9 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
     write_outputs (which stays the untouched SBS single-arm writer); it recomputes no score/rank.
 
     arm_a / arm_b -- the per-arm dicts from run_pipeline (each carries 'basins' scored + 'ranked').
-    creek_nearest -- per-creek nearest-outlet info, or None (a real fire with no truth-creek layer).
+    validation_case -- REQUIRED provenance stamp (no default: a careless direct caller must not silently
+    stamp a real fire "Montecito"). creek_nearest -- per-creek nearest-outlet info, or None (a real fire
+    with no truth-creek layer).
     out_dir -- output dir; dem_tif -- DEM path for the GeoJSON transform/CRS re-open (A25). zone -- the
     master-outlet delineation zone (classify_master_zone: PASS/FINDING); a FINDING is stamped as a loud
     low-confidence caveat (F2), None omits it (byte-identical to the pre-F2 call)."""
@@ -233,6 +235,8 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
     df = pd.DataFrame(rows)
     csv_path = out_dir / "ranking.csv"
     with open(csv_path, "w") as fh:
+        # consumer contract: the leading '#' lines are provenance/framing -- read the table with
+        # pd.read_csv(path, comment='#'); the default reader would treat them as data rows.
         fh.write(f"# {SCREENING_STATEMENT}\n")
         fh.write(f"# {DNBR_FRAMING}\n")
         fh.write(f"# burn_source=dNBR  validation_case={validation_case}\n")
@@ -262,6 +266,7 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
                       "slope_coverage_frac": round(a["slope_coverage_frac"], 4),   # F4
                       "low_slope_coverage": a["low_slope_coverage"],               # F4
                       "burn_coverage_frac": round(a["burn_coverage_frac"], 4),
+                      "low_coverage": a["low_coverage"],                          # minor: parity with the CSV
                       "flowed": a.get("flowed", False), "matched_creek": a.get("matched_creek", ""),
                       "burn_source": "dNBR", "screening": SCREENING_STATEMENT})
     gdf = gpd.GeoDataFrame(props, geometry=geoms, crs=dem_crs).to_crs("EPSG:4326")

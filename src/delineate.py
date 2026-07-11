@@ -254,6 +254,7 @@ def stage_2c_delineate(grid, acc, fdir_raster, transform, shape, outlets, asset_
         if own_km2 < MIN_BASIN_KM2:
             continue
         claimed |= own
+        own.flags.writeable = False   # arm-independence hardening: basin masks are read-only downstream
         kept.append({"outlet": b["outlet"], "mask": own,
                      "area_km2": own_km2, "asset_m": b["asset_m"]})
 

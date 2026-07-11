@@ -51,6 +51,12 @@ def test_tiles_for_bbox_southfork_single_tile():
     assert tiles_for_bbox(-105.7916, 33.3255, -105.6361, 33.4135) == ["n34w106"]
 
 
+def test_tiles_for_bbox_no_spurious_tile_at_integer_meridian():
+    # minor: a bbox whose east edge is an exact integer meridian (-106.0) lies entirely within w107;
+    # the boundary line must NOT pull in the spurious w106 (no cell center would sample it).
+    assert tiles_for_bbox(-106.5, 33.2, -106.0, 33.4) == ["n34w107"]
+
+
 def test_tiles_for_bbox_spans_multiple_tiles():
     # A bbox straddling two integer lon AND two integer lat lines -> the 2x2 tile block.
     got = tiles_for_bbox(-106.5, 33.5, -105.5, 34.5)

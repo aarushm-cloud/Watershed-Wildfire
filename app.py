@@ -22,6 +22,7 @@ tests/test_app.py. Run the app with:  streamlit run app.py
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -70,7 +71,11 @@ def result_to_view(result: dict) -> dict:
         return {"kind": "refused", "message": result.get("message", "Screening refused."),
                 "reason_code": result.get("reason_code")}
     if status == "ranked":
-        arm_a = result["arms"]["arm_a"]
+        arms = result.get("arms")
+        if arms is None:                               # minor: a non-dNBR (SBS-shaped) ranked result has
+            return {"kind": "unknown",                 # no 'arms' -- degrade, never KeyError
+                    "message": "Ranked result has no 'arms' (the UI expects the dNBR both-arms shape)."}
+        arm_a = arms["arm_a"]
         return {"kind": "ranked", "n_basins": len(arm_a["basins"]),
                 "headline_arm": result.get("headline_arm", "arm_a")}
     return {"kind": "unknown", "message": f"Unexpected pipeline result status: {status!r}."}
@@ -162,6 +167,7 @@ def run_screening(bbox_raw, dnbr_file, *, name="frontend"):
     is prefixed with its type. Not a swallow: the failure is NAMED in the message and nothing is
     retried or defaulted (A8 -- the sin is silence, not scope). Pure orchestration, no st.* calls,
     so tests drive it directly with fakes (tests/test_app.py)."""
+    out_dir = None
     try:
         # deferred imports INSIDE the try (still keeping `import app` light for unit tests): an
         # import-time failure in the heavy geo stack then reduces to a legible {"kind":"error"} dict
@@ -201,6 +207,9 @@ def run_screening(bbox_raw, dnbr_file, *, name="frontend"):
         import traceback
         traceback.print_exc(file=sys.stderr)           # preserve the dev debugging channel (the console)
         return {"kind": "error", "message": f"unexpected {type(e).__name__} during screening: {e}"}
+    finally:
+        if out_dir is not None:                        # minor: no per-run temp-dir leak -- the outputs
+            shutil.rmtree(out_dir, ignore_errors=True)  # are already read into memory before the return
 
 
 def build_basin_map(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA) -> folium.Map:

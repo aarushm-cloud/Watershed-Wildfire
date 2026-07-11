@@ -211,7 +211,7 @@ def main():
           f"{DNBR_NODATA_FAILLOUD_FRAC:.0%} required): "
           + ", ".join(f"b{k}={v:.1%}" for k, v in sorted(nd_fracs.items())))
 
-    slope = gate.mean_slope_tan(control["hydro"]["dem_raw"])    # reused 2d slope raster (DEM-derived)
+    slope = gate.mean_slope_tan(control["hydro"]["dem_raw"], control["hydro"]["dem_nodata"])   # match production (A33 drop-ring)
 
     results = {}
     for arm_name, arm_key, label in [("ArmA_binning", "arm_a", "dNBR-A"),

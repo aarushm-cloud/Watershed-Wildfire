@@ -358,6 +358,35 @@ def test_run_button_stores_and_stamps_result_in_the_holder():
     assert any("upload" in str(e.value).lower() for e in at.error)                # rendered legibly
 
 
+def test_run_screening_cleans_up_its_temp_dir(monkeypatch):
+    # minor: run_screening mkdtemp'd a fresh dir per run and never removed it (a leak on a long-lived
+    # server). Outputs are read into memory before return, so the dir must be cleaned in a finally.
+    import tempfile
+    import acquire
+    made = {}
+    real = tempfile.mkdtemp
+
+    def _spy(*a, **k):
+        d = real(*a, **k)
+        made["d"] = d
+        return d
+
+    def _boom(*a, **k):
+        raise GateAbort("boom after staging")
+
+    monkeypatch.setattr(tempfile, "mkdtemp", _spy)
+    monkeypatch.setattr(acquire, "build_fire_config", _boom)
+    app.run_screening(SFK_BBOX, _FakeUpload())
+    assert "d" in made and not Path(made["d"]).exists()   # created, then cleaned up
+
+
+def test_result_to_view_ranked_without_arms_is_unknown_not_keyerror():
+    # minor: a ranked result lacking the dNBR 'arms' shape (e.g. an SBS-shaped result, if ever wired to
+    # the UI) must degrade to kind='unknown', not raise KeyError.
+    view = app.result_to_view({"status": "ranked", "basins": [{"basin_id": 0}]})   # no "arms"
+    assert view["kind"] == "unknown"
+
+
 def test_finding_master_zone_renders_a_low_confidence_banner():
     # F2: a ranked result whose master-outlet zone is FINDING (order-of-magnitude sane but outside the
     # +/-15% validated band) must render a loud low-confidence banner -- never a silent confident rank.

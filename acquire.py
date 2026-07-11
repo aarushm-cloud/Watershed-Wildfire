@@ -159,7 +159,8 @@ def tiles_for_bbox(west: float, south: float, east: float, north: float) -> list
     """
     lat_lo = int(math.floor(min(south, north))) + 1
     lat_hi = int(math.ceil(max(south, north)))
-    lonmag_lo = int(math.ceil(-max(west, east)))     # least-negative lon -> smallest west magnitude
+    lonmag_lo = int(math.floor(-max(west, east))) + 1   # eastmost tile; floor()+1 (not ceil) so an exact
+    #                                                     integer east meridian doesn't pull a spurious tile
     lonmag_hi = int(math.floor(1.0 - min(west, east)))
     tiles = [f"n{lat:02d}w{lonmag:03d}"
              for lat in range(lat_lo, lat_hi + 1)
