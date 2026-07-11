@@ -9,8 +9,11 @@ Guardrail tier: Tier-2 (UI plumbing) -- no science here. The frozen formula, dNB
 `src/` are untouched; this only orchestrates acquire + run_pipeline + the existing output writers.
 
 Every artifact keeps the screening spine (A11: within-fire relative ranking, never a prediction)
-and the dNBR n=1 framing (A34: triage-validated, not exact-rank-validated). Fail-loud aborts
-(GateAbort/ValueError) and the A27 terrain refusal render as messages, never a stack trace.
+and the dNBR n=1 framing (A34: triage-validated, not exact-rank-validated). EVERY failure renders
+as a legible message, never a stack trace (F5): fail-loud aborts (GateAbort/ValueError) verbatim,
+the A27 terrain refusal as an honest outcome, and anything else (network/GDAL/osmnx) via the
+run_screening backstop with the exception NAMED -- translated loud, never swallowed. A stored
+result is stamped with the inputs that produced it; editing the box/upload flags it stale (F8).
 
 Testability: all logic lives in pure, importable helpers; the Streamlit UI is in `main()` behind
 an `if __name__ == "__main__"` guard, so `import app` (tests) never executes the UI. See
@@ -34,6 +37,11 @@ from src.outputs import SCREENING_STATEMENT, DNBR_FRAMING
 # |rankA - rankB| at/above which a basin is flagged "rank uncertain" (display heuristic, Tier-2, not
 # a science value): the honest surfacing of Arm A / Arm B disagreement (A34 rank_delta).
 RANK_UNCERTAIN_DELTA = 3
+
+# Decimal places for BOTH the bbox number_input display AND the F8 staleness key -- one constant so they
+# cannot drift apart (a key finer than the display flags stale after a visually no-op edit). 5 dp ~= 1 m
+# at these latitudes, far below the 10 m analysis cell, so sub-key differences are screening-irrelevant.
+_BBOX_DP = 5
 
 
 # ---- pure helpers (no Streamlit; unit-tested in tests/test_app.py) ------------------------------
@@ -125,6 +133,75 @@ def bbox_from_draw(draw: dict):
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+def screen_inputs_key(west, south, east, north, dnbr_file):
+    """Identity of the inputs a screening result was produced from (F8 staleness check).
+
+    A stored result is only "current" for the exact bbox + upload that produced it; after the user
+    edits the box or swaps the file, the old map/CSV must be flagged, never silently posed as the
+    new inputs' screening. The upload identity prefers Streamlit's per-upload file_id (a re-upload
+    of a same-named file gets a fresh id), falling back to (name, size). No upload -> None."""
+    f = None
+    if dnbr_file is not None:
+        fid = getattr(dnbr_file, "file_id", None)         # Streamlit sets a fresh uuid per upload
+        # explicit is-not-None (not `or`): an empty-but-present id must not silently fall back. The
+        # (name, size) fallback is defensive for non-Streamlit file-likes only; it can collide for a
+        # same-name/same-size re-export, so it never activates on a real Streamlit UploadedFile.
+        f = fid if fid is not None else (getattr(dnbr_file, "name", None), getattr(dnbr_file, "size", None))
+    return (round(float(west), _BBOX_DP), round(float(south), _BBOX_DP),
+            round(float(east), _BBOX_DP), round(float(north), _BBOX_DP), f)
+
+
+def run_screening(bbox_raw, dnbr_file, *, name="frontend"):
+    """One screening run end-to-end -> the screen dict main() stores in session_state
+    (kind: ranked | refused | error).
+
+    EVERY failure reduces to a legible {"kind": "error"} -- never a raise, never a stack trace to
+    the user (F5): GateAbort/ValueError carry their domain message verbatim; ANY other exception
+    (network drop, GDAL/rasterio on a wrong upload, osmnx/requests -- RasterioIOError is an OSError,
+    which the old narrow except let straight through to a Streamlit traceback) hits the backstop and
+    is prefixed with its type. Not a swallow: the failure is NAMED in the message and nothing is
+    retried or defaulted (A8 -- the sin is silence, not scope). Pure orchestration, no st.* calls,
+    so tests drive it directly with fakes (tests/test_app.py)."""
+    try:
+        # deferred imports INSIDE the try (still keeping `import app` light for unit tests): an
+        # import-time failure in the heavy geo stack then reduces to a legible {"kind":"error"} dict
+        # too, honoring the "EVERY failure" contract above rather than escaping as a raw traceback.
+        from acquire import build_fire_config
+        from src.pipeline import run_pipeline
+        from src.outputs import write_dnbr_outputs
+        bbox = validate_bbox(*bbox_raw)
+        if dnbr_file is None:
+            return {"kind": "error", "message": "Upload a raw-scale dNBR GeoTIFF before running."}
+        out_dir = Path(tempfile.mkdtemp(prefix="wws_frontend_"))
+        dnbr_path = out_dir / "dnbr_upload.tif"
+        dnbr_path.write_bytes(dnbr_file.getvalue())
+        fire = build_fire_config(bbox, dnbr_path, out_dir, name=name)
+        result = run_pipeline(fire)
+        view = result_to_view(result)
+        if view["kind"] == "ranked":
+            csv_path, gj_path = write_dnbr_outputs(
+                result["arms"]["arm_a"], result["arms"]["arm_b"], result["creek_nearest"],
+                fire["out_dir"], fire["dem"],
+                validation_case=f"{fire['name']} (coordinate entry, dNBR both-arms)")
+            try:
+                fc = json.loads(Path(gj_path).read_text())
+            except json.JSONDecodeError as e:   # a truncated geojson WE wrote is an internal fault, not
+                # a domain bbox/scale error -- route it to the backstop (type-named + logged) rather than
+                # render the cryptic JSONDecodeError verbatim through the domain-message catch below.
+                raise RuntimeError(f"wrote an unreadable basins.geojson at {gj_path}: {e}") from e
+            return {"kind": "ranked", "n": view["n_basins"], "fc": fc,
+                    "csv": Path(csv_path).read_bytes()}
+        if view["kind"] == "refused":
+            return {"kind": "refused", "message": view["message"]}
+        return {"kind": "error", "message": view.get("message", "Unexpected pipeline result.")}
+    except (GateAbort, ValueError) as e:
+        return {"kind": "error", "message": str(e)}     # legible domain message (bbox/scale/zone), verbatim
+    except Exception as e:                              # F5 backstop: never a traceback to the user
+        import traceback
+        traceback.print_exc(file=sys.stderr)           # preserve the dev debugging channel (the console)
+        return {"kind": "error", "message": f"unexpected {type(e).__name__} during screening: {e}"}
+
+
 def build_basin_map(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA) -> folium.Map:
     """A folium map of the ranked basins: fill by Arm A rank (hot=priority); a blue dashed outline
     flags basins where Arm A / Arm B disagree (rank-uncertain, A34)."""
@@ -171,11 +248,7 @@ def _draw_map():
 def main():
     import streamlit as st
     from streamlit_folium import st_folium
-
-    # deferred (network-layer + pipeline) imports so `import app` stays light for unit tests
-    from acquire import build_fire_config
-    from src.pipeline import run_pipeline
-    from src.outputs import write_dnbr_outputs
+    # (the network-layer + pipeline imports live inside run_screening, keeping `import app` light)
 
     st.set_page_config(page_title="Post-Fire Watershed Screening", layout="wide")
     st.title("Post-Fire Debris-Flow Watershed Screening")
@@ -191,50 +264,46 @@ def main():
 
     with col_form:
         st.subheader("Bounding box")
-        west = st.number_input("West (lon)", value=float(drawn[0]), format="%.5f")
-        south = st.number_input("South (lat)", value=float(drawn[1]), format="%.5f")
-        east = st.number_input("East (lon)", value=float(drawn[2]), format="%.5f")
-        north = st.number_input("North (lat)", value=float(drawn[3]), format="%.5f")
+        west = st.number_input("West (lon)", value=float(drawn[0]), format=f"%.{_BBOX_DP}f")
+        south = st.number_input("South (lat)", value=float(drawn[1]), format=f"%.{_BBOX_DP}f")
+        east = st.number_input("East (lon)", value=float(drawn[2]), format=f"%.{_BBOX_DP}f")
+        north = st.number_input("North (lat)", value=float(drawn[3]), format=f"%.{_BBOX_DP}f")
         dnbr_file = st.file_uploader("dNBR GeoTIFF (raw scale, ~ -1..1)", type=["tif", "tiff"])
         run = st.button("Run screening", type="primary")
 
-    # On click: compute the outcome and STORE it in session_state. It must NOT be rendered only inside
-    # this `if run:` block -- st_folium and the download button each trigger a rerun on which `run` is
-    # False, so results rendered here would flash and vanish. Render from session_state below instead.
-    if run:
-        try:
-            bbox = validate_bbox(west, south, east, north)
-            if dnbr_file is None:
-                st.session_state["screen"] = {"kind": "error",
-                    "message": "Upload a raw-scale dNBR GeoTIFF before running."}
-            else:
-                with st.spinner("Fetching DEM + buildings and scoring both dNBR arms..."):
-                    out_dir = Path(tempfile.mkdtemp(prefix="wws_frontend_"))
-                    dnbr_path = out_dir / "dnbr_upload.tif"
-                    dnbr_path.write_bytes(dnbr_file.getvalue())
-                    fire = build_fire_config(bbox, dnbr_path, out_dir, name="frontend")
-                    result = run_pipeline(fire)
-                view = result_to_view(result)
-                if view["kind"] == "ranked":
-                    csv_path, gj_path = write_dnbr_outputs(
-                        result["arms"]["arm_a"], result["arms"]["arm_b"], result["creek_nearest"],
-                        fire["out_dir"], fire["dem"],
-                        validation_case=f"{fire['name']} (coordinate entry, dNBR both-arms)")
-                    st.session_state["screen"] = {"kind": "ranked", "n": view["n_basins"],
-                        "fc": json.loads(Path(gj_path).read_text()),
-                        "csv": Path(csv_path).read_bytes()}
-                elif view["kind"] == "refused":
-                    st.session_state["screen"] = {"kind": "refused", "message": view["message"]}
-                else:
-                    st.session_state["screen"] = {"kind": "error",
-                        "message": view.get("message", "Unexpected pipeline result.")}
-        except (GateAbort, ValueError) as e:
-            st.session_state["screen"] = {"kind": "error", "message": str(e)}   # legible, no stack trace
+    # Identity of the CURRENT form inputs -- computed every rerun, used both to stamp a fresh result
+    # and to detect a stale one (F8).
+    inputs_key = screen_inputs_key(west, south, east, north, dnbr_file)
 
-    # Render the stored outcome EVERY run, so it persists across the reruns st_folium/download cause.
-    screen = st.session_state.get("screen")
-    if not screen:
+    # F1: hold the screen in a PERSISTENT container so storing a COMPLETED run is a plain dict mutation,
+    # never a SafeSessionState.__setitem__ (whose _yield_callback fires BEFORE the store -- so a rerun
+    # queued mid-fetch, e.g. an st_folium map click during the tens-of-seconds fetch, would raise
+    # RerunException between the finished run and its store and silently DISCARD the result). Established
+    # pre-run so the yield here is harmless (nothing computed yet to lose).
+    if "screen" not in st.session_state:
+        st.session_state["screen"] = {}
+    box = st.session_state["screen"]
+
+    # On click: compute the outcome (run_screening reduces EVERY failure to a legible dict -- F5) and
+    # store it stamped with the inputs that produced it, via a plain mutation of `box`. Rendered from
+    # the container below so it persists across the reruns st_folium/download trigger.
+    if run:
+        with st.spinner("Fetching DEM + buildings and scoring both dNBR arms..."):
+            screen = run_screening((west, south, east, north), dnbr_file)
+            screen["inputs"] = inputs_key
+            box.clear(); box.update(screen)          # store INSIDE the spinner, BEFORE its exit yields --
+            #   plain dict mutation with no yield point between the finished run and the store (F1)
+
+    screen = box
+    if not screen:                                    # empty container -> nothing screened yet
         return
+    # F8: a stored result is only current for the inputs that produced it. After the user edits the box
+    # or swaps the upload without re-running, keep the result visible but clearly labeled stale. An
+    # ABSENT stamp (a pre-F8 result surviving a dev hot-reload) counts as stale too -- unknown provenance
+    # renders flagged, not silently clean (fail-loud); a screening artifact must never pose as current.
+    if screen.get("inputs") != inputs_key:
+        st.warning("**Inputs changed since this result was produced** -- the box/upload above no "
+                   "longer match what is shown below. Click **Run screening** to re-screen.")
     if screen["kind"] == "error":
         st.error(f"Could not screen this area: {screen['message']}")
         return

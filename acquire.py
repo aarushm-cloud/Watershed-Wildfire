@@ -25,6 +25,8 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from pyproj import Transformer
+from rasterio.errors import RasterioError, RasterioIOError   # RasterioIOError subclasses OSError (vsicurl
+#                                                               IO); bare RasterioError = merge CRS mismatch
 from rasterio.merge import merge
 from rasterio.transform import Affine
 from rasterio.warp import Resampling, reproject
@@ -36,6 +38,7 @@ _REPO_ROOT = Path(__file__).resolve().parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from src.config import DNBR_CLAMP  # frozen RAW-dNBR clamp (0.100, 1.300) -- the guard's reference scale
+from src.config import ALLOWED_UTM_ZONES  # A25 ingest allowlist -- the F7 front-door check reads it
 from src.grids import GateAbort    # the project's A8 fail-loud contract; app.py catches it uniformly
 
 CELL_M = 10.0   # canonical analysis resolution (m); matches src.config.CELL_M (the frozen grid)
@@ -54,6 +57,15 @@ DNBR_RAW_MAX_ABS = 2.0    # physical dNBR ceiling |dNBR| <= 2 (F1); above this t
 # conventional scale (even x1000 dNBR tops out ~1300). Screened BEFORE the scale check so an UNDECLARED
 # nodata (read(masked=True) honors only a DECLARED nodata) can't false-refuse a valid raw raster.
 DNBR_FILL_ABS = 5000.0
+# F7 single-fire AOI cap (plumbing bound, NOT science; confidence `medium`, owner-tunable). A screening
+# AOI is one fire's burn area -- the validated/target cases are small-to-medium (South Fork ~0.014,
+# Thomas ~0.3 deg^2). 1 deg^2 (~110 x 92 km at 34N) clears those with headroom while refusing a
+# mis-drawn state/CONUS-scale box (hundreds of ~400 MB 3DEP tiles -> a hung fetch). CAVEAT: the largest
+# ~1M-acre megafire scars can exceed 1 deg^2 (Dixie 2021 ~1.5 clearly does; August Complex 2020 ~1.0-1.1
+# sits right at the strict-`>` boundary) -- acceptable for the niche (megafires get formal USGS
+# assessment; this tool targets the un-assessed small/medium gap) and the cap is owner-raisable.
+# deg^2 is a coarse lon/lat-box measure, not true area.
+MAX_BBOX_DEG2 = 1.0
 
 
 def _norm_epsg(crs) -> str:
@@ -171,15 +183,30 @@ def fetch_dem(bbox, grid: GridSpec, out_path, *, dem_nodata: float = DEM_NODATA)
     urls = ["/vsicurl/" + _3DEP_COG.format(tile=t) for t in tiles]
     srcs = []
     try:
-        for u in urls:
-            ds = rasterio.open(u)
+        for u, tile in zip(urls, tiles):
+            try:
+                ds = rasterio.open(u)
+            except RasterioIOError as e:   # 404/DNS/timeout/truncated COG (F6); local OSErrors fall
+                raise GateAbort(           # through to the F5 backstop rather than mislabel as a bucket outage
+                    f"FAIL: 3DEP tile {tile} fetch failed ({e}) -- most commonly the endpoint is "
+                    "unreachable/rate-limited or the tile is missing from the bucket (see the error "
+                    "above for the exact cause). Record as a finding and retry; acquire does NOT "
+                    "silently proceed on a partial mosaic (A8; DATA_SOURCES S1).") from e
+            srcs.append(ds)   # [C3]: owned by `finally` immediately, before the CRS check below can raise
             native = str(ds.crs).upper()
             if native not in ("EPSG:4269", "EPSG:4326"):
                 raise GateAbort(f"FAIL: 3DEP tile native CRS {native} is not NAD83/WGS84 geographic "
                                  f"(expected EPSG:4269) -- vintage/product drift; record as a finding, "
                                  f"do NOT silently warp (A8, A24 S3 precedent).")
-            srcs.append(ds)
-        mosaic, mosaic_transform = merge(srcs, bounds=(west, south, east, north))  # windowed read
+        try:
+            mosaic, mosaic_transform = merge(srcs, bounds=(west, south, east, north))  # windowed read
+        except (RasterioIOError, RasterioError) as e:   # F6: RasterioIOError = connection drop / corrupt
+            # tile mid-read; a BARE RasterioError = merge's own inter-tile CRS-mismatch raise. Translate
+            # both so neither escapes a direct caller as a raw traceback.
+            raise GateAbort(
+                f"FAIL: 3DEP mosaic read failed mid-fetch ({e}) -- a connection dropped, a tile is "
+                "corrupt, or the tiles' CRSs differ; record as a finding and retry (A8; DATA_SOURCES "
+                "S1).") from e
         src_crs, src_nodata = srcs[0].crs, srcs[0].nodata
         dst = np.full((grid.height, grid.width), dem_nodata, dtype="float32")
         reproject(source=mosaic[0], destination=dst,
@@ -230,10 +257,28 @@ def fetch_buildings(bbox, dst_crs, out_path, *, buf_deg: float = 0.012):
     DATA_SOURCES S4: cache per fire; DRAINS_TO_ASSET_M is applied later (delineate/score), not here.
     """
     import osmnx as ox   # lazy: heavy import, only paid when actually fetching
+    # osmnx 2.x RAISES on an empty Overpass result (it does not return an empty gdf), so the
+    # len()==0 guard below never fires on that path; the private-module import is pinned-safe
+    # (osmnx==2.1.0, A10/A13 lockfile) and verified in-env 2026-07-09.
+    from osmnx._errors import InsufficientResponseError
 
     west, south, east, north = bbox
     poly = box(west - buf_deg, south - buf_deg, east + buf_deg, north + buf_deg)  # lon/lat (EPSG:4326)
-    gdf = ox.features_from_polygon(poly, tags={"building": True})
+    try:
+        gdf = ox.features_from_polygon(poly, tags={"building": True})
+    except InsufficientResponseError as e:
+        raise GateAbort("FAIL: Overpass returned 0 buildings over the AOI (A8) -- unexpected for a "
+                         "populated area; treat as a source/endpoint problem, not 'no assets'.") from e
+    except Exception as e:   # F6: osmnx's exception surface is version-dependent (requests errors + its
+        # own ValueError subclasses), so TRANSLATE anything the network call raises into the one loud
+        # type app.py catches. Not a swallow: the type is NAMED + cause chained. The cause is phrased
+        # "most commonly" network so a non-network failure (e.g. MemoryError on a huge urban AOI, a
+        # post-rebuild API change) surfaces its real type instead of a wrong "just retry" prescription.
+        raise GateAbort(
+            f"FAIL: OSM/Overpass buildings fetch failed ({type(e).__name__}: {e}) -- most commonly "
+            "Overpass rate-limiting or downtime (DATA_SOURCES S4 flags it as flaky); see the named "
+            "error above for the actual cause. acquire does NOT silently proceed without an asset "
+            "layer (A8).") from e
     if gdf is None or len(gdf) == 0:
         raise GateAbort("FAIL: Overpass returned 0 buildings over the AOI (A8) -- unexpected for a "
                          "populated area; treat as a source/endpoint problem, not 'no assets'.")
@@ -256,9 +301,22 @@ def assert_raw_dnbr(dnbr_path) -> dict:
     UNDECLARED nodata (which read(masked=True) does NOT mask) can't false-refuse a valid raw raster.
     Returns stats for the manifest. Raises on all-NoData / all-sentinel too.
     """
-    with rasterio.open(dnbr_path) as ds:
-        band = ds.read(1, masked=True)          # masks only a DECLARED nodata
-        total = ds.width * ds.height            # captured here -- no second open (was a duplicate)
+    try:
+        with rasterio.open(dnbr_path) as ds:
+            driver = ds.driver                  # GDAL sniffs CONTENT, not the .tif extension
+            band = ds.read(1, masked=True)      # masks only a DECLARED nodata
+            total = ds.width * ds.height        # captured here -- no second open (was a duplicate)
+    except RasterioIOError as e:   # F6: unreadable / corrupt / truncated upload -> legible, not a GDAL trace
+        raise GateAbort(
+            f"FAIL: uploaded dNBR {Path(dnbr_path).name} could not be read as a raster ({e}). If it "
+            "opens in GIS locally this may be a local disk/staging problem; otherwise upload the raw "
+            "dNBR GeoTIFF itself, not a truncated or non-raster file (A8).") from e
+    if driver != "GTiff":   # [13]: a colorized dNBR PNG/JPEG renamed .tif OPENS via its own driver, so
+        # the read above does not fail -- and a dark one (values ~0) would slip the scale guard below and
+        # be SILENTLY scored. Refuse a non-GeoTIFF raster outright.
+        raise GateAbort(
+            f"FAIL: uploaded dNBR {Path(dnbr_path).name} is a {driver} raster, not a GeoTIFF -- this "
+            "looks like a colorized/exported image, not raw dNBR. Upload the raw dNBR GeoTIFF (A8).")
     finite = np.asarray(band.compressed(), dtype="float64")
     finite = finite[np.isfinite(finite)]
     if finite.size == 0:
@@ -293,8 +351,27 @@ def build_fire_config(bbox, dnbr_path, out_dir, name: str = "fire", *, buf_deg: 
     """
     west, south, east, north = bbox
     out_dir = Path(out_dir)
+    # F7 front-door AOI cap -- cheapest check first, before even the dNBR read. A mis-drawn
+    # state/CONUS-scale box passes lon/lat validation but would enumerate hundreds of 3DEP tiles.
+    area_deg2 = (east - west) * (north - south)
+    if area_deg2 > MAX_BBOX_DEG2:
+        raise GateAbort(
+            f"FAIL: bounding box covers {area_deg2:.2f} deg^2 (> the {MAX_BBOX_DEG2:.0f} deg^2 "
+            f"single-fire cap): {len(tiles_for_bbox(west, south, east, north))} 3DEP tiles would be "
+            "fetched. Draw a box around ONE fire's burn area -- or, if this genuinely is a single "
+            "megafire scar, raising acquire.MAX_BBOX_DEG2 is an owner decision (plumbing bound, not "
+            "science) (A8/F7).")
     dnbr_stats = assert_raw_dnbr(dnbr_path)                     # CF-9 guard before any fetch
     grid = canonical_grid(west, south, east, north)            # CF-6: lon/lat -> UTM 10 m grid
+    # F7 front-door zone check -- the pipeline ingests only ALLOWED_UTM_ZONES (A25). Without this,
+    # an un-onboarded fire pays the full DEM+buildings fetch and THEN aborts deep in ingest with an
+    # assets-CRS message far from the cause. Refuse here with the onboarding pointer instead.
+    zone = int(grid.crs.split(":")[1])
+    if zone not in ALLOWED_UTM_ZONES:
+        raise GateAbort(
+            f"FAIL: this bbox resolves to UTM zone {grid.crs}, not in the onboarded allowlist "
+            f"{sorted(ALLOWED_UTM_ZONES)} (A25). Onboarding a new fire's zone = adding it to "
+            "src/config.ALLOWED_UTM_ZONES -- an owner decision, never auto-widened here (A8/F7).")
     stage = out_dir / "inputs"
     dem_path = fetch_dem(bbox, grid, stage / "dem.tif")        # CF-7 (module-level -> monkeypatchable)
     assets_path, n_buildings = fetch_buildings(bbox, grid.crs, stage / "buildings.gpkg", buf_deg=buf_deg)  # CF-8

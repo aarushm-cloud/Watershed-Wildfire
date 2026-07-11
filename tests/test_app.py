@@ -15,6 +15,7 @@ Run:  pytest tests/test_app.py -v
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -143,6 +144,219 @@ def test_app_loads_with_framing_and_inputs():
     assert any(b.label == "Run screening" for b in at.button)            # the run button rendered
 
 
+# ---- F5: run_screening -- EVERY failure reduces to a legible screen dict, never a raise ---------
+
+class _FakeUpload:
+    """Stands in for streamlit's UploadedFile (name/size/file_id are instance attrs there too)."""
+    def __init__(self, data=b"raster-bytes", name="dnbr.tif", file_id="upload-1"):
+        self._data = data
+        self.name = name
+        self.size = len(data)
+        self.file_id = file_id
+
+    def getvalue(self):
+        return self._data
+
+
+def test_run_screening_gateabort_message_verbatim(monkeypatch):
+    import acquire
+
+    def _abort(*a, **k):
+        raise GateAbort("FAIL: uploaded dNBR looks x1000-scaled")
+
+    monkeypatch.setattr(acquire, "build_fire_config", _abort)
+    screen = app.run_screening(SFK_BBOX, _FakeUpload())
+    assert screen["kind"] == "error"
+    assert screen["message"] == "FAIL: uploaded dNBR looks x1000-scaled"   # domain message, verbatim
+
+
+def test_run_screening_backstops_network_errors_as_legible_error(monkeypatch):
+    # RasterioIOError is an OSError, NOT a ValueError -- without the F5 backstop it escapes the
+    # except and reaches the user as a raw Streamlit traceback. It must reduce to a named message.
+    import acquire
+    from rasterio.errors import RasterioIOError
+
+    def _net_down(*a, **k):
+        raise RasterioIOError("CURL error: Could not resolve host")
+
+    monkeypatch.setattr(acquire, "build_fire_config", _net_down)
+    screen = app.run_screening(SFK_BBOX, _FakeUpload())
+    assert screen["kind"] == "error"
+    assert "RasterioIOError" in screen["message"]                # the failure is named...
+    assert "resolve host" in screen["message"]                   # ...and the detail carried
+
+
+def test_run_screening_requires_an_upload():
+    screen = app.run_screening(SFK_BBOX, None)
+    assert screen["kind"] == "error"
+    assert "upload" in screen["message"].lower()
+
+
+def test_run_screening_corrupt_upload_is_a_legible_geotiff_error():
+    # End-to-end through the REAL acquire scale guard (no monkeypatch): garbage bytes renamed .tif
+    # must come back as a legible "not a readable GeoTIFF" error dict -- the most likely user mistake.
+    screen = app.run_screening(SFK_BBOX, _FakeUpload(data=b"definitely not a geotiff"))
+    assert screen["kind"] == "error"
+    assert "GeoTIFF" in screen["message"]
+
+
+# ---- F8: stale-result detection ------------------------------------------------------------------
+
+_APP_DEFAULT_BBOX = (-105.79156, 33.32552, -105.63614, 33.41352)   # app.py's South Fork default form
+
+
+def test_screen_inputs_key_distinguishes_bbox_and_upload():
+    k1 = app.screen_inputs_key(*SFK_BBOX, _FakeUpload(file_id="A"))
+    same = app.screen_inputs_key(*SFK_BBOX, _FakeUpload(file_id="A"))
+    other_box = app.screen_inputs_key(-105.8, 33.3, -105.6, 33.4, _FakeUpload(file_id="A"))
+    other_file = app.screen_inputs_key(*SFK_BBOX, _FakeUpload(file_id="B"))
+    assert k1 == same
+    assert k1 != other_box and k1 != other_file
+    assert app.screen_inputs_key(*SFK_BBOX, None) != k1            # upload removed -> different
+
+
+def test_stale_results_are_flagged_after_inputs_change():
+    """F8: a stored result whose inputs no longer match the current form must render WITH an
+    'inputs changed' warning (still visible, clearly labeled stale) -- never silently posing as
+    the current box's screening."""
+    from streamlit.testing.v1 import AppTest
+    fc = _fc(_feature("b1", rank=1, rank_b=1))
+    at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90)
+    at.session_state["screen"] = {"kind": "ranked", "fc": fc, "csv": b"x", "n": 1,
+                                  "inputs": ("some", "other", "bbox")}   # produced by DIFFERENT inputs
+    at.run()
+    assert not at.exception, at.exception
+    assert any("inputs changed" in str(w.value).lower() for w in at.warning)
+    assert len(at.dataframe) >= 1                                  # stale result still visible, labeled
+
+
+def test_matching_results_show_no_stale_warning():
+    """F8 negative control: a stored result stamped with the CURRENT form inputs renders clean."""
+    from streamlit.testing.v1 import AppTest
+    fc = _fc(_feature("b1", rank=1, rank_b=1))
+    current = app.screen_inputs_key(*_APP_DEFAULT_BBOX, None)      # the app's default form state
+    at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90)
+    at.session_state["screen"] = {"kind": "ranked", "fc": fc, "csv": b"x", "n": 1,
+                                  "inputs": current}
+    at.run()
+    assert not at.exception, at.exception
+    assert not any("inputs changed" in str(w.value).lower() for w in at.warning)
+    assert len(at.dataframe) >= 1
+
+
+# ---- [2]: run_screening SUCCESS paths (the F5 backstop otherwise hides success-branch bugs) --------
+
+def test_run_screening_ranked_success_path(monkeypatch, tmp_path):
+    # Drive run_screening to kind=='ranked' so a bug in the success branch (a typo, a wrong writer
+    # arg) fails a test LOUDLY instead of shipping green behind the F5 `except Exception` backstop.
+    import acquire
+    from src import pipeline as pl
+    from src import outputs as outs
+    ranked = {"status": "ranked", "headline_arm": "arm_a", "provenance": {"burn_source": "dNBR"},
+              "arms": {"arm_a": {"basins": [{"basin_id": 0}, {"basin_id": 1}]}, "arm_b": {"basins": []}},
+              "creek_nearest": None}
+    gj = tmp_path / "basins.geojson"; gj.write_text(json.dumps(_fc(_feature("b0", 1, 1))))
+    cp = tmp_path / "ranking.csv"; cp.write_bytes(b"# spine\nbasin_id,rank\n0,1\n")
+    monkeypatch.setattr(acquire, "build_fire_config",
+                        lambda bbox, path, out_dir, **k: {"name": "t", "out_dir": out_dir, "dem": "x"})
+    monkeypatch.setattr(pl, "run_pipeline", lambda fire: ranked)
+    monkeypatch.setattr(outs, "write_dnbr_outputs", lambda *a, **k: (cp, gj))
+    screen = app.run_screening(SFK_BBOX, _FakeUpload())
+    assert screen["kind"] == "ranked" and screen["n"] == 2
+    assert screen["fc"]["type"] == "FeatureCollection" and screen["csv"].startswith(b"# spine")
+
+
+def test_run_screening_refused_path(monkeypatch):
+    import acquire
+    from src import pipeline as pl
+    monkeypatch.setattr(acquire, "build_fire_config", lambda *a, **k: {"name": "t", "out_dir": ".", "dem": "x"})
+    monkeypatch.setattr(pl, "run_pipeline",
+                        lambda fire: {"status": "refused", "reason_code": "REFUSED_INCISED_TERRAIN",
+                                      "message": "Refused: this fire's terrain is an incised valley."})
+    screen = app.run_screening(SFK_BBOX, _FakeUpload())
+    assert screen["kind"] == "refused" and "incised" in screen["message"].lower()
+
+
+def test_run_screening_logs_traceback_to_stderr_on_backstop(monkeypatch, capsys):
+    # [4]: the backstop must preserve the developer debugging channel -- emit the full traceback to
+    # stderr (the local `streamlit run` console) even though the user sees only the one-line message.
+    import acquire
+    def _boom(*a, **k):
+        raise RuntimeError("internal boom")
+    monkeypatch.setattr(acquire, "build_fire_config", _boom)
+    screen = app.run_screening(SFK_BBOX, _FakeUpload())
+    assert screen["kind"] == "error" and "RuntimeError" in screen["message"]
+    err = capsys.readouterr().err
+    assert "Traceback" in err and "internal boom" in err
+
+
+# ---- [7]/[8]: staleness key precision + fallback --------------------------------------------------
+
+def test_screen_inputs_key_ignores_sub_display_precision_jitter():
+    # Widgets display+submit at %.5f; the key must round at the SAME precision so a 6th-decimal-only
+    # difference (a drawn full-precision box vs its re-typed 5-dp value) does not spuriously flag stale.
+    k1 = app.screen_inputs_key(-105.7915643, 33.3255156, -105.6361360, 33.4135210, None)
+    k2 = app.screen_inputs_key(-105.79156, 33.32552, -105.63614, 33.41352, None)   # equal at 5 dp
+    assert k1 == k2
+
+
+def test_screen_inputs_key_falls_back_to_name_size_without_file_id():
+    class _NoId:
+        def __init__(self, name, size): self.name, self.size = name, size
+        def getvalue(self): return b"x"
+    a = app.screen_inputs_key(*SFK_BBOX, _NoId("a.tif", 100))
+    b = app.screen_inputs_key(*SFK_BBOX, _NoId("b.tif", 100))
+    assert a != b and a is not None                       # distinct by name when file_id absent
+
+
+# ---- [3]/[9]: staleness through the real widget seam + unstamped-is-stale -------------------------
+
+def test_stale_flagged_when_a_coordinate_is_edited():
+    """[3] the killing test: actually CHANGE a form input and assert the banner appears -- pins
+    inputs_key to the live number_input values (a `drawn`-sourced key would miss a typed edit)."""
+    from streamlit.testing.v1 import AppTest
+    fc = _fc(_feature("b1", rank=1, rank_b=1))
+    at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90)
+    at.session_state["screen"] = {"kind": "ranked", "fc": fc, "csv": b"x", "n": 1,
+                                  "inputs": app.screen_inputs_key(*_APP_DEFAULT_BBOX, None)}
+    at.run()
+    assert not any("inputs changed" in str(w.value).lower() for w in at.warning)   # matches default form
+    at.number_input[0].set_value(-106.0)                 # user edits West -> stored result now stale
+    at.run()
+    assert not at.exception, at.exception
+    assert any("inputs changed" in str(w.value).lower() for w in at.warning)
+
+
+def test_unstamped_result_is_treated_as_stale():
+    # [9]/[12]: a result lacking the inputs stamp (a pre-F8 result surviving a dev hot-reload) must
+    # render FLAGGED, not silently clean -- unknown provenance = stale (fail-loud).
+    from streamlit.testing.v1 import AppTest
+    fc = _fc(_feature("b1", rank=1, rank_b=1))
+    at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90)
+    at.session_state["screen"] = {"kind": "ranked", "fc": fc, "csv": b"x", "n": 1}   # NO inputs stamp
+    at.run()
+    assert not at.exception, at.exception
+    assert any("inputs changed" in str(w.value).lower() for w in at.warning)
+
+
+def test_run_button_stores_and_stamps_result_in_the_holder():
+    # round-2/[1]: pin the `if run:` glue that stores a completed run into the persistent holder
+    # (box.clear/update inside the spinner) AND stamps it -- previously untested end-to-end, so a
+    # revert/break of the store path shipped green. Drives the REAL button (no upload -> a legible
+    # error screen), and asserts the store executed, stamped, and rendered. (The rerun-RACE the store
+    # placement guards against is not unit-testable in synchronous AppTest -- it is mechanism-verified.)
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90).run()
+    btn = [b for b in at.button if b.label == "Run screening"][0]
+    btn.set_value(True)
+    at.run()
+    assert not at.exception, at.exception
+    stored = at.session_state["screen"]
+    assert stored["kind"] == "error" and "upload" in stored["message"].lower()   # ran + stored
+    assert "inputs" in stored                                                     # stamped (F8)
+    assert any("upload" in str(e.value).lower() for e in at.error)                # rendered legibly
+
+
 def test_ranked_results_persist_across_reruns():
     """Regression: st_folium (and the download button) trigger reruns on which the run button reads
     False; results must be held in session_state and re-rendered, not vanish. Seeds a ranked screen
@@ -151,7 +365,8 @@ def test_ranked_results_persist_across_reruns():
     fc = _fc(_feature("b1", rank=1, rank_b=1), _feature("b2", rank=2, rank_b=6))
     at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90)
     at.session_state["screen"] = {"kind": "ranked", "fc": fc,
-                                  "csv": b"# ranking\nbasin_id,rank\nb1,1\nb2,2\n", "n": 2}
+                                  "csv": b"# ranking\nbasin_id,rank\nb1,1\nb2,2\n", "n": 2,
+                                  "inputs": app.screen_inputs_key(*_APP_DEFAULT_BBOX, None)}   # stamped: not stale
     at.run()                                     # render from session_state (a rerun, run button False)
     assert not at.exception, at.exception
     assert len(at.dataframe) >= 1                 # the ranking table rendered

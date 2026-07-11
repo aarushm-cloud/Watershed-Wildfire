@@ -153,6 +153,16 @@ def test_assert_raw_dnbr_passes_undeclared_nodata_sentinel(tmp_path):
     assert stats["p99_abs"] <= 2.0                         # scale judged on the physical pixels only
 
 
+def test_assert_raw_dnbr_rejects_unreadable_file(tmp_path):
+    # F6: a corrupt / renamed non-GeoTIFF upload (the single most likely user mistake) must come back
+    # as a legible GateAbort, not a raw RasterioIOError/GDAL trace escaping to the UI.
+    p = tmp_path / "not_a_geotiff.tif"
+    p.write_bytes(b"This is not a GeoTIFF, it is a renamed text file.")
+    with pytest.raises(GateAbort) as e:
+        assert_raw_dnbr(p)
+    assert "GeoTIFF" in str(e.value)
+
+
 def test_assert_raw_dnbr_rejects_small_mis_scale(tmp_path):
     # A x3 mis-scale (~ -1.5..3.75) slips a |p99|>5 guard but exceeds the physical dNBR bound [-2,2]
     # (NBR in [-1,1] -> dNBR in [-2,2]); feeding it to the frozen bins saturates moderate pixels to
@@ -161,3 +171,180 @@ def test_assert_raw_dnbr_rejects_small_mis_scale(tmp_path):
     p = _write_raster(tmp_path / "dnbr_x3.tif", raw3, nodata=None)
     with pytest.raises(GateAbort):
         assert_raw_dnbr(p)
+
+
+# ---- F6: network failures translate to legible GateAbort (the one type app.py catches) ---------
+
+def test_fetch_dem_translates_tile_fetch_failure_to_gateabort(tmp_path, monkeypatch):
+    # A 404/timeout/DNS failure on a 3DEP COG currently surfaces as a raw RasterioIOError. It must
+    # become a GateAbort naming the tile and chaining the cause (translated loud, never swallowed).
+    from rasterio.errors import RasterioIOError
+    real_open = rasterio.open
+
+    def _fail_on_vsicurl(path, *a, **k):
+        if str(path).startswith("/vsicurl/"):
+            raise RasterioIOError("HTTP response code: 404")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(rasterio, "open", _fail_on_vsicurl)
+    from acquire import canonical_grid, fetch_dem
+    bbox = (-105.7916, 33.3255, -105.6361, 33.4135)
+    grid = canonical_grid(*bbox)
+    with pytest.raises(GateAbort) as e:
+        fetch_dem(bbox, grid, tmp_path / "dem.tif")
+    msg = str(e.value)
+    assert "n34w106" in msg and "404" in msg                    # names the tile + underlying cause
+    assert isinstance(e.value.__cause__, RasterioIOError)       # cause chained, never swallowed
+
+
+def test_fetch_buildings_translates_overpass_failure_to_gateabort(tmp_path, monkeypatch):
+    # Overpass rate-limit / connection drop surfaces as a requests/osmnx exception; must become a
+    # legible GateAbort naming the failure, with the cause chained.
+    import osmnx
+    import requests
+
+    def _net_down(*a, **k):
+        raise requests.exceptions.ConnectionError("Overpass unreachable")
+
+    monkeypatch.setattr(osmnx, "features_from_polygon", _net_down)
+    from acquire import fetch_buildings
+    with pytest.raises(GateAbort) as e:
+        fetch_buildings((-105.79, 33.33, -105.64, 33.41), "EPSG:32613", tmp_path / "b.gpkg")
+    msg = str(e.value)
+    assert "Overpass" in msg and "ConnectionError" in msg
+    assert e.value.__cause__ is not None                        # cause chained
+
+
+def test_fetch_buildings_maps_empty_overpass_result_to_zero_buildings_abort(tmp_path, monkeypatch):
+    # osmnx 2.x RAISES InsufficientResponseError on an empty Overpass result (it does not return an
+    # empty gdf), so the len()==0 guard never fires on that path -- the raise must map to the same
+    # legible 0-buildings abort, not the generic network-failure message.
+    import osmnx
+    from osmnx._errors import InsufficientResponseError
+
+    def _empty(*a, **k):
+        raise InsufficientResponseError("No matching features. Check query location/tags.")
+
+    monkeypatch.setattr(osmnx, "features_from_polygon", _empty)
+    from acquire import fetch_buildings
+    with pytest.raises(GateAbort) as e:
+        fetch_buildings((-105.79, 33.33, -105.64, 33.41), "EPSG:32613", tmp_path / "b.gpkg")
+    assert "0 buildings" in str(e.value)
+
+
+def test_assert_raw_dnbr_rejects_renamed_image(tmp_path):
+    # F6/[13]: GDAL sniffs CONTENT not extension, so a colorized dNBR PNG/JPEG renamed .tif OPENS
+    # (via the PNG driver) -- the OSError path never fires, and a dark uint8 image could even slip the
+    # scale guard and be silently scored. The driver check must refuse a non-GeoTIFF raster outright.
+    Image = pytest.importorskip("PIL.Image")
+    img = np.zeros((20, 20), dtype="uint8")            # a dark single-band "export"
+    p = tmp_path / "colorized_dnbr.tif"                # renamed image (uploader filters on extension)
+    Image.fromarray(img).save(p, format="PNG")         # PNG bytes in a .tif file
+    with pytest.raises(GateAbort) as e:
+        assert_raw_dnbr(p)
+    assert "GeoTIFF" in str(e.value)                   # legible: "upload the raw dNBR GeoTIFF, not an image"
+
+
+def test_fetch_dem_translates_merge_failure_to_gateabort(tmp_path, monkeypatch):
+    # F6/[10]: the connection-drop / corrupt-tile-mid-read case (the OSError around merge()) -- the
+    # harder-to-reproduce field failure -- must translate to a legible GateAbort, cause chained.
+    from rasterio.errors import RasterioIOError
+
+    class _FakeDS:
+        crs = "EPSG:4269"
+        nodata = None
+        def close(self):
+            pass
+
+    def _boom(*a, **k):
+        raise RasterioIOError("Connection reset by peer mid-read")
+
+    monkeypatch.setattr(rasterio, "open", lambda *a, **k: _FakeDS())   # tiles "open" with a valid CRS
+    monkeypatch.setattr(acquire, "merge", _boom)                        # ...then merge drops mid-fetch
+    from acquire import canonical_grid, fetch_dem
+    bbox = (-105.7916, 33.3255, -105.6361, 33.4135)
+    grid = canonical_grid(*bbox)
+    with pytest.raises(GateAbort) as e:
+        fetch_dem(bbox, grid, tmp_path / "dem.tif")
+    assert "mid-fetch" in str(e.value)
+    assert isinstance(e.value.__cause__, RasterioIOError)
+
+
+def test_fetch_dem_translates_crs_mismatch_to_gateabort(tmp_path, monkeypatch):
+    # round-2/[2]: merge() raises a BARE RasterioError (not a RasterioIOError) on an inter-tile CRS
+    # mismatch -- both a 4269 and a 4326 tile pass the per-tile allowlist, then merge rejects the mix.
+    # The merge wrap must catch RasterioError too, not let it escape as a raw traceback.
+    from rasterio.errors import RasterioError
+
+    class _FakeDS:
+        crs = "EPSG:4269"
+        nodata = None
+        def close(self):
+            pass
+
+    def _mismatch(*a, **k):
+        raise RasterioError("CRS mismatch with source: <tile>")
+
+    monkeypatch.setattr(rasterio, "open", lambda *a, **k: _FakeDS())
+    monkeypatch.setattr(acquire, "merge", _mismatch)
+    from acquire import canonical_grid, fetch_dem
+    bbox = (-105.7916, 33.3255, -105.6361, 33.4135)
+    grid = canonical_grid(*bbox)
+    with pytest.raises(GateAbort) as e:
+        fetch_dem(bbox, grid, tmp_path / "dem.tif")
+    assert isinstance(e.value.__cause__, RasterioError)
+
+
+# ---- F7: front-door bounds -- refuse BEFORE any network work ------------------------------------
+
+def _raw_dnbr(tmp_path):
+    return _write_raster(tmp_path / "raw.tif",
+                         np.linspace(-1.0, 1.2, 400, dtype="float32").reshape(20, 20))
+
+
+def test_build_fire_config_refuses_unonboarded_utm_zone_before_any_fetch(tmp_path, monkeypatch):
+    # An Oregon bbox resolves to UTM zone 10 (EPSG:32610), not in ALLOWED_UTM_ZONES {32611, 32613}
+    # (A25). Today the pipeline aborts only AFTER the full DEM+buildings fetch, mislabeled as an
+    # assets-CRS error. Must refuse at the front door with the onboarding pointer, zero network work.
+    called = []
+    monkeypatch.setattr(acquire, "fetch_dem", lambda *a, **k: called.append("dem"))
+    monkeypatch.setattr(acquire, "fetch_buildings", lambda *a, **k: called.append("bld"))
+    with pytest.raises(GateAbort) as e:
+        build_fire_config((-123.8, 43.6, -123.6, 43.8), _raw_dnbr(tmp_path), out_dir=tmp_path / "out")
+    msg = str(e.value)
+    assert "32610" in msg and "ALLOWED_UTM_ZONES" in msg
+    assert called == []                                          # zero fetches before the refusal
+
+
+def test_build_fire_config_refuses_oversized_bbox_before_any_fetch(tmp_path, monkeypatch):
+    # A CONUS-scale mis-draw passes lon/lat validation but would enumerate hundreds of 3DEP tiles
+    # and hang the app in the spinner. The single-fire AOI cap must refuse before ANY work.
+    called = []
+    monkeypatch.setattr(acquire, "fetch_dem", lambda *a, **k: called.append("dem"))
+    monkeypatch.setattr(acquire, "fetch_buildings", lambda *a, **k: called.append("bld"))
+    with pytest.raises(GateAbort) as e:
+        build_fire_config((-120.0, 32.0, -114.0, 38.0), _raw_dnbr(tmp_path), out_dir=tmp_path / "out")
+    assert "deg^2" in str(e.value)                               # names the cap
+    assert called == []
+
+
+def test_build_fire_config_area_cap_boundary(tmp_path, monkeypatch):
+    # [11]: pin the strict-`>` boundary so a mutation (cap value, `>` vs `>=`, a units slip) can't
+    # survive the suite. Exactly 1.0 deg^2 in an onboarded zone is ACCEPTED and reaches the fetchers;
+    # 1.01 deg^2 is REFUSED before any fetch.
+    staged = {}
+    monkeypatch.setattr(acquire, "fetch_dem",
+                        lambda bbox, grid, out_path, **k: (Path(out_path).parent.mkdir(parents=True, exist_ok=True),
+                                                           _write_raster(out_path, np.ones((grid.height, grid.width), "float32")),
+                                                           staged.setdefault("dem", out_path))[-1])
+    monkeypatch.setattr(acquire, "fetch_buildings",
+                        lambda bbox, dst, out_path, **k: (Path(out_path).parent.mkdir(parents=True, exist_ok=True),
+                                                          Path(out_path).write_text("stub"),
+                                                          (out_path, 633))[-1])
+    # exactly 1.0 deg^2, centroid lon -105.5 -> zone 13 (onboarded): accepted
+    fire = build_fire_config((-106.0, 33.0, -105.0, 34.0), _raw_dnbr(tmp_path), out_dir=tmp_path / "ok")
+    assert "dem" in staged and fire["sbs"] is None
+    # 1.01 deg^2: refused before any fetch
+    with pytest.raises(GateAbort) as e:
+        build_fire_config((-106.01, 33.0, -105.0, 34.0), _raw_dnbr(tmp_path), out_dir=tmp_path / "over")
+    assert "deg^2" in str(e.value)
