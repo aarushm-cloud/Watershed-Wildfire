@@ -465,3 +465,46 @@ taken by the ordering ADR — hence the renumber.)*
   cross-check (per-outlet catchment area Pearson 0.9994 on the scored basins; whole-grid divergence a
   documented coastal-ocean/edge artifact) + hypothesis property tests locking the frozen scoring
   invariants. Depends on A34 (dNBR) + A35 (acquire); overrides C2/D0, reconciles A7, invokes A1.
+
+### A38 — Master-outlet FM-1 guard made SCALE-FREE; PASS/FINDING classification removed (supersedes review T5)
+
+- **Context.** The master-outlet check binned the domain pour-point's catchment area into PASS / FINDING /
+  ABORT using km² bands centered on `MASTER_KNOWN_KM2 = 39.19` (the stale Week-0 Montecito figure; the
+  live reconstructed master is 44.7273 km²): PASS `[33.3, 45.1]` (±15%), ABORT outside `[20, 80]`. Those
+  bands are calibrated to one fire — they flag/pass on **absolute size**, not delineation correctness, and
+  do not generalize. On an arbitrary bbox the middle "FINDING" band went silently low-confidence (Code
+  Review 2026-07-09 F2) and the `[20, 80]` ABORT bounds are Montecito-scaled. The guard's one *proven*
+  job is FM-1: pysheds coordinate-mode once returned 0 km² and silently deleted the two largest flowed
+  basins. Review item **T5** proposed re-baselining the bands to 44.7273; this decision instead removes
+  them and goes scale-free.
+- **Decision.** Replace `classify_master_zone(area_km2) -> {PASS,FINDING,ABORT}` (`src/pipeline.py`) with
+  `assert_master_outlet_scale(master_km2, valid_area_km2)`: GateAbort iff `master_km2` is non-finite or
+  ≤ 0, `valid_area_km2` ≤ 0, or `master_km2 / valid_area_km2 < MASTER_MIN_AOI_FRACTION`. In `src/config.py`
+  drop `MASTER_PASS_*` / `MASTER_ORDER_*`; keep `MASTER_KNOWN_KM2` as a print-only reference (no live logic
+  keys off it); add the one new constant `MASTER_MIN_AOI_FRACTION = 0.05`. The `zone` field is **dropped
+  entirely** from the result dicts and every output artifact/UI (no numeric replacement) — the guard aborts
+  on collapse upstream rather than stamping a per-fire confidence label.
+  - **Open decisions, as resolved by the owner (2026-07-13):** (1) **floor = 0.05**; (2) **denominator =
+    valid DEM cells** (`_valid_dem_mask`, finite ∧ ≠ nodata); (3) **lower-only** (a master ≈ AOI is a clean
+    single-drainage crop, not an error); (4) **drop the manifest `zone` field entirely**; (5) owner accepts
+    that **no per-fire delineation-confidence surface remains until the P4 independent-reference check** —
+    the only per-fire signal is now the binary scale-free abort.
+- **Derived value (computed, not invented).** `validation/data/dem.tif` loaded as the pipeline loads it:
+  valid AOI = 168.9332 km² (1,689,332 valid cells × 1e-4), master = 44.7273 km² → **master / valid AOI =
+  0.26476**. Floor `0.05 ≈ 0.2648 / 5` (a 5× collapse-detection margin): far above the FM-1 signature
+  (fraction → ~0) yet low enough not to false-abort a multi-drainage AOI (Montecito itself is one, at 26%).
+  A clean round number on purpose — a conservative collapse detector, not a fitted quality threshold.
+- **Frozen-value impact.** None to the scoring fence. `MASTER_PASS/ORDER` were per-fire config anchors
+  (DECISIONS §"config-classification" Category 1 / borderline), not method constants; removing them does
+  not re-open validation. The behavior lock is **byte-identical** (Montecito 44.73 km² = 26.5% ≥ 5% → does
+  not abort; AUC 0.9722 / ranked order / coverage unchanged). `validation/gate.py` (read-only oracle, A16)
+  took a **behavior-neutral** edit: dropped the vestigial `classify_master_zone` re-export and updated its
+  `main()` diagnostic print to show the fraction (the behavior lock exercises `run_pipeline`, not `main()`).
+- **Status.** IMPLEMENTED + verified (TDD) 2026-07-13; **staged, not committed** (owner commits). New
+  `tests/test_master_scale_guard.py` proves scale-freedom (collapse aborts at multiple AOI sizes; a 300 km²
+  large-fire master that the old 80 km² ceiling would have false-aborted now passes) + the non-finite/
+  non-positive aborts. Full suite **157 green**, behavior lock byte-identical. Supersedes review **T5**
+  (`docs/ALGORITHMS_REVIEW.md`). Relations → [[FAILURE_MODES]] FM-1 (guard now scale-free); A18 (valid-cell
+  denominator sense); the C1 → P4 out-of-sample discipline (no confidence surface until P4); complements
+  **A37** (CONUS UTM widening) — running arbitrary CONUS bboxes is exactly why a Montecito-calibrated km²
+  band had to become scale-free.

@@ -80,17 +80,12 @@ def run_fire(fire):
     _assert_inputs_present(fire)                          # clean SystemExit if any non-None input path is missing
     result = run_pipeline(fire)
     code = dispatch_result(result)                       # refusal -> prints + exit 0; ranked -> 0
-    if result.get("zone") == "FINDING":                  # F2: a FINDING delineation must never be silent
-        print(f"[{fire['name']}] WARNING master-outlet zone=FINDING "
-              f"({result['hydro']['master_km2']:.2f} km^2, outside the +/-15% validated band) -- the "
-              "delineation, and thus the ranking, is LOW-CONFIDENCE (FM-1).", file=sys.stderr)
     if result["status"] == "ranked":
         if result["provenance"]["burn_source"] == "dNBR":
             # A34 dNBR both-arms: Arm A headline + Arm B companion + rank_delta (src/outputs.write_dnbr_outputs)
             csv_path, gj_path = write_dnbr_outputs(
                 result["arms"]["arm_a"], result["arms"]["arm_b"], result["creek_nearest"],
-                fire["out_dir"], fire["dem"], validation_case=fire["validation_case"],
-                zone=result.get("zone"))
+                fire["out_dir"], fire["dem"], validation_case=fire["validation_case"])
             n = len(result["arms"]["arm_a"]["basins"])
             print(f"[{fire['name']}] ranked (dNBR both-arms): {n} basins; wrote {csv_path} , {gj_path}")
         else:

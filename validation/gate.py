@@ -56,7 +56,7 @@ from src.outputs import write_outputs
 # resolve unchanged. Values are byte-identical to the pre-move gate.py definitions.
 from src.pipeline import (
     run_pipeline, dispatch_result, evaluate,
-    _load_dem_artifacts, stage_2a_hydrology, classify_master_zone, mean_slope_tan,
+    _load_dem_artifacts, stage_2a_hydrology, mean_slope_tan,
     compute_creek_nearest, _terrain_applicability_gate,
     MONTECITO_FIRE, SOUTHFORK_FIRE, CELL_AREA_KM2,
     ROOT, DATA, OUT, DEM_TIF, SBS_TIF, ASSETS_GJ, CREEKS_GJ,
@@ -97,8 +97,9 @@ def main() -> None:
     hydro, basins, ranked, m = R["hydro"], R["basins"], R["ranked"], R["metrics"]
 
     # --- 2a/2b/2c summary ---
+    _master_frac = hydro['master_km2'] / hydro['valid_area_km2']
     print(f"\n[2a] master outlet = {hydro['master_km2']:.2f} km^2 (known {MASTER_KNOWN_KM2}) "
-          f"-> {R['zone']}  [row,col={hydro['master_rowcol']}, index mode, FM-1 guard]")
+          f"= {_master_frac:.1%} of valid AOI  [row,col={hydro['master_rowcol']}, index mode, FM-1 scale-free guard]")
     print(f"[2b] canyon-mouth outlets detected = {len(R['outlets'])}")
     print(f"[2c] candidate basins = {len(basins)} (report: 32); no exact score ties: {R['n_ties']==0}")
 

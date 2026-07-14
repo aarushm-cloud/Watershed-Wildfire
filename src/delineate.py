@@ -8,7 +8,7 @@ contiguous delineation functions, lifted VERBATIM. EXPLICIT-ARGS signatures (not
 bag) -- the caller (gate) unpacks hydro at the call site, so the dict-key coupling stays in
 gate, not here. Deliberately NOT here (stay in gate): scoring + mean_burn/mean_slope (2e),
 _burn_weight_raster + A18 coverage, evaluate (2f), and the whole-domain master-outlet /
-classify_master_zone block (2a). No new types/dataclasses (C9); basins stay loose dicts.
+scale-free anti-collapse guard block (2a). No new types/dataclasses (C9); basins stay loose dicts.
 
 FM-1: the per-basin grid.catchment(...) runs in INDEX mode (xytype="index", x=col, y=row,
 integer coords) -- coordinate mode silently returns 0 km^2. Carried byte-for-byte, with both

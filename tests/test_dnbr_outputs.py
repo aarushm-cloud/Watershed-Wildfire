@@ -22,11 +22,11 @@ from src.pipeline import run_pipeline, MONTECITO_DNBR_FIRE
 from src.outputs import write_dnbr_outputs
 
 
-def _run_and_write(tmp_path, zone=None):
+def _run_and_write(tmp_path):
     R = run_pipeline(MONTECITO_DNBR_FIRE)
     csv_path, gj_path = write_dnbr_outputs(
         R["arms"]["arm_a"], R["arms"]["arm_b"], R["creek_nearest"], tmp_path,
-        MONTECITO_DNBR_FIRE["dem"], MONTECITO_DNBR_FIRE["validation_case"], zone=zone)
+        MONTECITO_DNBR_FIRE["dem"], MONTECITO_DNBR_FIRE["validation_case"])
     return csv_path, gj_path
 
 
@@ -47,14 +47,15 @@ def test_write_outputs_fails_loud_on_zero_basins(tmp_path):
     assert "0 basins" in str(e.value)
 
 
-def test_write_dnbr_outputs_surfaces_finding_zone(tmp_path):
-    # F2: a FINDING master-outlet zone (order-of-magnitude sane but outside the +/-15% validated band)
-    # must travel on the artifact as a loud caveat + a provenance stamp, not proceed silently.
-    csv_path, gj_path = _run_and_write(tmp_path, zone="FINDING")
-    htext = "".join(_read_rows(csv_path)[0]).lower()
-    assert "master" in htext and "low-confidence" in htext
+def test_dnbr_provenance_has_no_master_zone_field(tmp_path):
+    # Drop-entirely contract (scale-free FM-1 guard supersedes PASS/FINDING/ABORT): the retired zone
+    # label must NOT travel on the artifact, and no low-confidence master caveat is emitted -- the guard
+    # aborts on collapse upstream instead of stamping a Montecito-calibrated band. See DECISIONS
+    # (scale-free master-outlet guard) + docs/ALGORITHMS_REVIEW.md T5.
+    csv_path, gj_path = _run_and_write(tmp_path)
+    assert "low-confidence" not in "".join(_read_rows(csv_path)[0]).lower()
     fc = json.loads(Path(gj_path).read_text())
-    assert fc["provenance"]["master_zone"] == "FINDING"
+    assert "master_zone" not in fc["provenance"]
 
 
 def test_dnbr_geojson_carries_low_coverage(tmp_path):
@@ -63,13 +64,6 @@ def test_dnbr_geojson_carries_low_coverage(tmp_path):
     _, gj_path = _run_and_write(tmp_path)
     fc = json.loads(Path(gj_path).read_text())
     assert "low_coverage" in fc["features"][0]["properties"]
-
-
-def test_write_dnbr_outputs_pass_zone_no_caveat(tmp_path):
-    csv_path, gj_path = _run_and_write(tmp_path, zone="PASS")
-    assert "low-confidence" not in "".join(_read_rows(csv_path)[0]).lower()
-    fc = json.loads(Path(gj_path).read_text())
-    assert fc["provenance"]["master_zone"] == "PASS"
 
 
 def _read_rows(csv_path):

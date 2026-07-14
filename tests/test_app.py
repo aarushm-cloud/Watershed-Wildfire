@@ -254,7 +254,7 @@ def test_run_screening_ranked_success_path(monkeypatch, tmp_path):
     from src import outputs as outs
     ranked = {"status": "ranked", "headline_arm": "arm_a", "provenance": {"burn_source": "dNBR"},
               "arms": {"arm_a": {"basins": [{"basin_id": 0}, {"basin_id": 1}]}, "arm_b": {"basins": []}},
-              "creek_nearest": None, "zone": "PASS"}
+              "creek_nearest": None}
     gj = tmp_path / "basins.geojson"; gj.write_text(json.dumps(_fc(_feature("b0", 1, 1))))
     cp = tmp_path / "ranking.csv"; cp.write_bytes(b"# spine\nbasin_id,rank\n0,1\n")
     monkeypatch.setattr(acquire, "build_fire_config",
@@ -264,7 +264,6 @@ def test_run_screening_ranked_success_path(monkeypatch, tmp_path):
     screen = app.run_screening(SFK_BBOX, _FakeUpload())
     assert screen["kind"] == "ranked" and screen["n"] == 2
     assert screen["fc"]["type"] == "FeatureCollection" and screen["csv"].startswith(b"# spine")
-    assert screen["zone"] == "PASS"                                              # F2: zone carried through
 
 
 def test_run_screening_refused_path(monkeypatch):
@@ -385,19 +384,6 @@ def test_result_to_view_ranked_without_arms_is_unknown_not_keyerror():
     # the UI) must degrade to kind='unknown', not raise KeyError.
     view = app.result_to_view({"status": "ranked", "basins": [{"basin_id": 0}]})   # no "arms"
     assert view["kind"] == "unknown"
-
-
-def test_finding_master_zone_renders_a_low_confidence_banner():
-    # F2: a ranked result whose master-outlet zone is FINDING (order-of-magnitude sane but outside the
-    # +/-15% validated band) must render a loud low-confidence banner -- never a silent confident rank.
-    from streamlit.testing.v1 import AppTest
-    fc = _fc(_feature("b1", rank=1, rank_b=1))
-    at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90)
-    at.session_state["screen"] = {"kind": "ranked", "fc": fc, "csv": b"x", "n": 1, "zone": "FINDING",
-                                  "inputs": app.screen_inputs_key(*_APP_DEFAULT_BBOX, None)}
-    at.run()
-    assert not at.exception, at.exception
-    assert any("master" in str(w.value).lower() and "confiden" in str(w.value).lower() for w in at.warning)
 
 
 def test_ranked_results_persist_across_reruns():

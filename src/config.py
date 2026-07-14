@@ -48,20 +48,37 @@ SLOPE_LOW_COVERAGE = 0.80     # F4: flag basins with < this fraction of clean (n
 
 # --- canonical grid (the validation case CRS; metres) ---
 CANONICAL_CRS  = "EPSG:32611"   # Montecito/UTM-11N validation zone; the PER-FIRE DEFAULT (A25)
-# A25: the per-fire CRS becomes additive -- callers default to CANONICAL_CRS, but a fire's own
-# DEM CRS is threaded where it matters. This allowlist is the loud gate on which metric UTM zones
-# may be ingested: add the zone when onboarding a fire; a missing zone fails loud (not a silent
-# degrade). Montecito = 32611 (validation), South Fork 2024 = 32613 (P3 generalization fire).
-ALLOWED_UTM_ZONES = {32611, 32613}
+# A25: the per-fire CRS is additive -- callers default to CANONICAL_CRS, but a fire's own DEM CRS
+# is threaded where it matters. This allowlist is the loud gate on which metric UTM zones may be
+# ingested; a zone outside it fails loud, never a silent degrade.
+# A37: widened from the two onboarded fires to the whole CONUS coverage -- UTM 10N-19N (EPSG
+# 32610..32619), the contiguous-US 3DEP regime the method was built for. The gate is now a COVERAGE
+# bound, not an onboarding gate: any CONUS bbox is accepted here, and the SCIENCE gates behind it
+# (A27 terrain span, the CONTOUR_M range guard, dNBR coverage fail-loud, the F2 low-confidence
+# stamp) decide per-area whether a ranking is produced -- "correct areas only" lives there, not here.
+# Validity is a SEPARATE axis from the gate: only Montecito (32611) is VALIDATED; South Fork (32613)
+# was generalization-only (A24) and every other zone is covered-but-UNVALIDATED. No new caveat is
+# added -- honesty rests on the screening + "dNBR unvalidated for ranking" framing already on every
+# output (the Spine). Alaska/Hawaii (a different regime) stay out; adding them is a deliberate edit.
+ALLOWED_UTM_ZONES = set(range(32610, 32620))   # CONUS UTM 10N-19N (A37); was {32611, 32613} (A25)
 CELL_M         = 10.0                      # DEM resolution (m); dx = dy = 10 m
 # NOTE: CELL_AREA_KM2 (= CELL_M**2 / 1e6) is a DERIVATION, not a standalone tunable; per the
 # P1.1 named-binding rule it stays computed at its use-site in gate.py from this CELL_M,
 # rather than being extracted here.
 
-# --- master-outlet zones (the FM-1 anti-0km2 guard), area in km^2 ---
+# --- master-outlet FM-1 anti-collapse guard (SCALE-FREE; supersedes the PASS/FINDING/ABORT bands) ---
+# MASTER_KNOWN_KM2 is the Week-0 DOCUMENTED master area, now a print-only reference (validation/gate.py
+# main() quotes it). The reconstructed master is 44.7273 km^2 (tests/test_behavior_lock.py); treat that
+# as truth and 39.19 as a superseded label. No live logic keys off this value.
 MASTER_KNOWN_KM2 = 39.19
-MASTER_PASS_LO, MASTER_PASS_HI   = 33.3, 45.1   # +/-15% of 39.19 -> PASS
-MASTER_ORDER_LO, MASTER_ORDER_HI = 20.0, 80.0   # outside this -> ABORT (order-of-magnitude)
+# The domain pour-point's catchment must be at least this FRACTION of the AOI's VALID DEM area, else
+# GateAbort (FM-1: pysheds coordinate-mode once returned 0 km^2 and silently deleted the two largest
+# flowed basins). A fraction, not a km^2 band, so it protects EVERY fire, not just Montecito-sized ones.
+# DERIVED: Montecito master 44.7273 km^2 / valid AOI 168.9332 km^2 = 0.2648; floored at that / ~5 (a
+# 5x collapse-detection margin). Conservative collapse detector, NOT a delineation-quality threshold;
+# lower-only (a master ~= AOI is a clean single-drainage crop, not an error). See DECISIONS A38 (scale-free
+# master-outlet guard) + docs/ALGORITHMS_REVIEW.md T5. dimensionless (km^2 / km^2).
+MASTER_MIN_AOI_FRACTION = 0.05
 
 # pysheds default D8 dirmap, listed in the order [N, NE, E, SE, S, SW, W, NW].
 DIRMAP = (64, 128, 1, 2, 4, 8, 16, 32)

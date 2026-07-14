@@ -39,10 +39,7 @@ from src.config import (
     TRUTH_MATCH_M,
     CANONICAL_CRS,
     CELL_M,
-    MASTER_PASS_LO,
-    MASTER_PASS_HI,
-    MASTER_ORDER_LO,
-    MASTER_ORDER_HI,
+    MASTER_MIN_AOI_FRACTION,
     DIRMAP,
     DNBR_NODATA_FAILLOUD_FRAC,
 )
@@ -203,22 +200,40 @@ def stage_2a_hydrology(fire, dem_artifacts=None):
     catch = grid.catchment(x=int(mcol), y=int(mrow), fdir=fdir,
                            dirmap=DIRMAP, xytype="index", routing="d8")
     master_km2 = int(np.asarray(catch).sum()) * CELL_AREA_KM2
+    # FM-1 scale-free denominator: the AOI's VALID terrain area (finite AND != nodata), same mask the
+    # A25/A27 guards use (_valid_dem_mask). The master-outlet guard checks master_km2 against THIS.
+    valid_area_km2 = int(_valid_dem_mask(dem_raw, dem_nodata).sum()) * CELL_AREA_KM2
 
     return {"grid": grid, "dem_raw": dem_raw, "dem_nodata": dem_nodata, "fdir_raster": fdir,
             "fdir": np.asarray(fdir), "acc": acc_arr, "transform": dem_transform,
             "shape": shape, "master_rowcol": (int(mrow), int(mcol)),
-            "master_acc_cells": int(acc_arr[mrow, mcol]), "master_km2": master_km2}
+            "master_acc_cells": int(acc_arr[mrow, mcol]), "master_km2": master_km2,
+            "valid_area_km2": valid_area_km2}
 
 
-def classify_master_zone(area_km2: float) -> str:
-    """Resolve master-outlet area into ABORT / PASS / FINDING (no mushy boundary)."""
-    if not np.isfinite(area_km2) or area_km2 <= 0.0:
-        return "ABORT"
-    if area_km2 < MASTER_ORDER_LO or area_km2 > MASTER_ORDER_HI:
-        return "ABORT"
-    if MASTER_PASS_LO <= area_km2 <= MASTER_PASS_HI:
-        return "PASS"
-    return "FINDING"
+def assert_master_outlet_scale(master_km2: float, valid_area_km2: float) -> float:
+    """FM-1 SCALE-FREE anti-collapse guard. GateAbort unless the domain pour-point's catchment is a
+    meaningful FRACTION of the AOI's valid DEM area; returns that fraction (dimensionless).
+
+    Supersedes the Montecito-calibrated PASS/FINDING/ABORT km^2 bands, which flagged on absolute size
+    (calibrated to one fire) rather than delineation collapse. A fraction generalizes: the FM-1 bug
+    drives master_km2 -> ~0 (fraction -> ~0) at ANY AOI size, so a single floor catches it everywhere,
+    while a legitimately large fire (master 300 km^2) is no longer false-aborted by an 80 km^2 ceiling.
+    Lower-only: a master ~= 100% of the AOI is a clean single-drainage crop, not an error. This is a
+    collapse detector, NOT a delineation-confidence surface (none remains until the P4 reference check).
+
+    master_km2      -- domain max-accumulation catchment area (km^2).
+    valid_area_km2  -- AOI valid DEM area (km^2); see stage_2a_hydrology / _valid_dem_mask.
+    """
+    if not np.isfinite(master_km2) or master_km2 <= 0.0 or valid_area_km2 <= 0.0:
+        raise GateAbort(f"Master outlet {master_km2} km^2 / valid AOI {valid_area_km2} km^2 is "
+                        "non-finite or non-positive -- delineation collapse (FM-1).")
+    fraction = master_km2 / valid_area_km2
+    if fraction < MASTER_MIN_AOI_FRACTION:
+        raise GateAbort(f"Master outlet {master_km2:.2f} km^2 = {fraction:.1%} of valid AOI "
+                        f"{valid_area_km2:.1f} km^2, below the {MASTER_MIN_AOI_FRACTION:.0%} floor -- "
+                        "the whole-AOI pour-point drains too little; delineation collapse (FM-1).")
+    return fraction
 
 
 # ---------------------------------------------------------------------------
@@ -491,9 +506,7 @@ def run_pipeline(fire=None):
     # Hydrology + master outlet run ONLY for terrain that passed the gate. stage_2a opens+aligns SBS and
     # reuses the DEM artifacts loaded above -- the pipeline opens the DEM exactly once (A31).
     hydro = stage_2a_hydrology(fire, dem_artifacts)
-    zone = classify_master_zone(hydro["master_km2"])
-    if zone == "ABORT":
-        raise GateAbort(f"Master outlet {hydro['master_km2']:.2f} km^2 in ABORT zone (FM-1).")
+    assert_master_outlet_scale(hydro["master_km2"], hydro["valid_area_km2"])   # FM-1 scale-free guard; raises on collapse
 
     # A25 carve-out: fail loud if CONTOUR_M is grossly mis-set for this DEM BEFORE detecting outlets
     # (else a wrong-fire contour silently yields zero/wrong canyon mouths). Montecito 150 m is inside
@@ -530,7 +543,7 @@ def run_pipeline(fire=None):
         ranked, n_ties = stage_2e_score(wt, covered, slope, basins)  # frozen burn x slope x area; src/score.py
         metrics = evaluate(basins, ranked, creek_nearest, TRUTH_MATCH_M) if creek_nearest is not None else None
         return {"status": "ranked",   # A27 discriminator (P3.4-build-2): ranked-result vs the refusal-result above
-                "hydro": hydro, "zone": zone, "outlets": outlets, "basins": basins,
+                "hydro": hydro, "outlets": outlets, "basins": basins,
                 "ranked": ranked, "n_ties": n_ties, "creeks": creeks,
                 "creek_nearest": creek_nearest, "metrics": metrics,
                 "provenance": provenance}   # A4/A15: single burn-source stamp from the ingest seam
@@ -569,7 +582,7 @@ def run_pipeline(fire=None):
     provenance = {"burn_source": "dNBR"}   # A4: single burn-source stamp
 
     return {"status": "ranked",
-            "hydro": hydro, "zone": zone, "outlets": outlets,
+            "hydro": hydro, "outlets": outlets,
             "provenance": provenance, "creeks": creeks, "creek_nearest": creek_nearest,
             "arms": {"arm_a": arm_a, "arm_b": arm_b}, "headline_arm": "arm_a",
             "dnbr_diag": {"valid": D["valid"], "nodata_mask": D["nodata_mask"],
