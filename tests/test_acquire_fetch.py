@@ -326,18 +326,34 @@ def _raw_dnbr(tmp_path):
                          np.linspace(-1.0, 1.2, 400, dtype="float32").reshape(20, 20))
 
 
-def test_build_fire_config_refuses_unonboarded_utm_zone_before_any_fetch(tmp_path, monkeypatch):
-    # An Oregon bbox resolves to UTM zone 10 (EPSG:32610), not in ALLOWED_UTM_ZONES {32611, 32613}
-    # (A25). Today the pipeline aborts only AFTER the full DEM+buildings fetch, mislabeled as an
-    # assets-CRS error. Must refuse at the front door with the onboarding pointer, zero network work.
+def test_build_fire_config_refuses_non_conus_utm_zone_before_any_fetch(tmp_path, monkeypatch):
+    # A37 widened the gate to the whole CONUS coverage (UTM 10N-19N), so the refusal example must be
+    # OUT of CONUS. A Munich bbox resolves to UTM zone 32N (EPSG:32632). Must refuse at the front door
+    # with the coverage pointer, zero network work (not a deep post-fetch assets-CRS error).
     called = []
     monkeypatch.setattr(acquire, "fetch_dem", lambda *a, **k: called.append("dem"))
     monkeypatch.setattr(acquire, "fetch_buildings", lambda *a, **k: called.append("bld"))
     with pytest.raises(GateAbort) as e:
-        build_fire_config((-123.8, 43.6, -123.6, 43.8), _raw_dnbr(tmp_path), out_dir=tmp_path / "out")
+        build_fire_config((11.5, 48.1, 11.6, 48.2), _raw_dnbr(tmp_path), out_dir=tmp_path / "out")
     msg = str(e.value)
-    assert "32610" in msg and "ALLOWED_UTM_ZONES" in msg
+    assert "32632" in msg and "CONUS" in msg
     assert called == []                                          # zero fetches before the refusal
+
+
+def test_build_fire_config_accepts_newly_covered_conus_zone(tmp_path, monkeypatch):
+    # A37 pin: an Oregon zone-10 bbox that was REFUSED pre-A37 (zone 10 not in {32611, 32613}) now
+    # passes the front-door zone gate and reaches the fetchers -- the exact behavior A37 changes.
+    staged = {}
+    monkeypatch.setattr(acquire, "fetch_dem",
+                        lambda bbox, grid, out_path, **k: (Path(out_path).parent.mkdir(parents=True, exist_ok=True),
+                                                           _write_raster(out_path, np.ones((grid.height, grid.width), "float32")),
+                                                           staged.setdefault("dem", out_path))[-1])
+    monkeypatch.setattr(acquire, "fetch_buildings",
+                        lambda bbox, dst, out_path, **k: (Path(out_path).parent.mkdir(parents=True, exist_ok=True),
+                                                          Path(out_path).write_text("stub"),
+                                                          (out_path, 42))[-1])
+    fire = build_fire_config((-123.8, 43.6, -123.6, 43.8), _raw_dnbr(tmp_path), out_dir=tmp_path / "ok")
+    assert "dem" in staged and fire["expected_crs"] == "EPSG:32610"   # Oregon zone 10N, now covered
 
 
 def test_build_fire_config_refuses_oversized_bbox_before_any_fetch(tmp_path, monkeypatch):

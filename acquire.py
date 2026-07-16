@@ -364,15 +364,16 @@ def build_fire_config(bbox, dnbr_path, out_dir, name: str = "fire", *, buf_deg: 
             "science) (A8/F7).")
     dnbr_stats = assert_raw_dnbr(dnbr_path)                     # CF-9 guard before any fetch
     grid = canonical_grid(west, south, east, north)            # CF-6: lon/lat -> UTM 10 m grid
-    # F7 front-door zone check -- the pipeline ingests only ALLOWED_UTM_ZONES (A25). Without this,
-    # an un-onboarded fire pays the full DEM+buildings fetch and THEN aborts deep in ingest with an
-    # assets-CRS message far from the cause. Refuse here with the onboarding pointer instead.
+    # F7 front-door zone check -- the pipeline ingests only ALLOWED_UTM_ZONES: now the whole CONUS
+    # coverage (UTM 10N-19N, A37). Without this, an out-of-coverage bbox pays the full DEM+buildings
+    # fetch and THEN aborts deep in ingest with an assets-CRS message far from the cause. Refuse here.
     zone = int(grid.crs.split(":")[1])
     if zone not in ALLOWED_UTM_ZONES:
         raise GateAbort(
-            f"FAIL: this bbox resolves to UTM zone {grid.crs}, not in the onboarded allowlist "
-            f"{sorted(ALLOWED_UTM_ZONES)} (A25). Onboarding a new fire's zone = adding it to "
-            "src/config.ALLOWED_UTM_ZONES -- an owner decision, never auto-widened here (A8/F7).")
+            f"FAIL: this bbox resolves to UTM zone {grid.crs}, outside the tool's CONUS coverage "
+            f"(UTM 10N-19N = EPSG 32610-32619, A37). It screens contiguous-US fires on 3DEP terrain; "
+            "Alaska/Hawaii/non-US is out of coverage -- extending it is an owner edit to "
+            "src/config.ALLOWED_UTM_ZONES (A8/F7).")
     stage = out_dir / "inputs"
     dem_path = fetch_dem(bbox, grid, stage / "dem.tif")        # CF-7 (module-level -> monkeypatchable)
     assets_path, n_buildings = fetch_buildings(bbox, grid.crs, stage / "buildings.gpkg", buf_deg=buf_deg)  # CF-8

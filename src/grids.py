@@ -21,20 +21,19 @@ class GateAbort(RuntimeError):
 
 
 def _assert_metric_crs(layer_crs, name: str) -> None:
-    """Fail loud unless `layer_crs` is an ALLOWED metric UTM zone (A25 allowlist).
+    """Fail loud unless `layer_crs` is an ALLOWED metric UTM zone (A25/A37 allowlist).
 
-    The job is to refuse a non-metric CRS so we never compute distances in degrees. A25 makes
-    this per-fire: instead of pinning the single validation zone (EPSG:32611), it accepts any
-    zone in config.ALLOWED_UTM_ZONES (32611 Montecito, 32613 South Fork). A zone NOT in the
-    allowlist -- including any geographic CRS like EPSG:4326 -- fails loud (block the fire),
-    never silently proceeds; onboarding a new fire means adding its zone to the allowlist.
-    String-normalised (str().upper()) exactly as before, so the Montecito 32611 path is
-    unchanged. (Both 32611 and 32613 are metric UTM, so allowlist membership == metric+allowed.)"""
+    The job is to refuse a non-metric CRS so we never compute distances in degrees. A25 made this
+    per-fire; A37 widened config.ALLOWED_UTM_ZONES to the whole CONUS coverage (UTM 10N-19N /
+    EPSG 32610..32619). A zone NOT in the set -- including any geographic CRS like EPSG:4326, or a
+    non-CONUS UTM zone -- fails loud (block the fire), never silently proceeds. String-normalised
+    (str().upper()) exactly as before, so the Montecito 32611 path is unchanged. (Every allowed
+    zone is metric UTM, so set membership == metric+allowed.)"""
     allowed = {f"EPSG:{z}" for z in ALLOWED_UTM_ZONES}
     if layer_crs is None or str(layer_crs).upper() not in allowed:
         raise GateAbort(f"{name} CRS is {layer_crs}, not in the allowed metric UTM zones "
-                        f"{sorted(ALLOWED_UTM_ZONES)} (A25 allowlist). Refusing to compute "
-                        "distances in a non-metric / un-onboarded CRS.")
+                        f"{sorted(ALLOWED_UTM_ZONES)} (A25/A37 allowlist). Refusing to compute "
+                        "distances in a non-metric / non-CONUS CRS.")
 
 
 def _rc_to_xy(rows: np.ndarray, cols: np.ndarray, transform) -> np.ndarray:
