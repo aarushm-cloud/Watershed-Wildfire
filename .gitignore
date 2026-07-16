@@ -20,5 +20,8 @@ __pycache__/
 # OS / editor
 .DS_Store
 
+/tests/fixtures
+
 # Extra
 CLAUDE.md
+/.claude/commands
