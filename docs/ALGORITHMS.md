@@ -1,12 +1,12 @@
 # Post-Fire Debris-Flow Watershed Screening Tool: Algorithms Reference
 
 **Author:** Aarush Madhireddy
-**Date:** July 6, 2026
+**Date:** July 6, 2026 · **reconciled to the live tree 2026-07-11**
 **Scope:** A walkthrough of every algorithm in the scoring pipeline, from burn/DEM ingest through the frozen `mean_burn × mean_slope × contributing_area_km²` heuristic to the within-fire ranking and the validation metrics. Each algorithm gets one plain-language explanation ("For the Environmental Scientist") and one implementation-level explanation ("For the Programmer").
 
 > **The spine, stated once, up top.** Every score in this pipeline is a **within-fire ordinal ranking** of "which burned watersheds warrant a closer look first." It is **never** a prediction of where debris will go, never a probability, never a volume, and never cross-fire comparable. The tool triages fires that fall outside formal USGS/state assessment; it does not out-model USGS. This framing is stamped into every artifact ([outputs.py:35](../src/outputs.py#L35)) and it governs how you read everything below.
 
-This document reflects the **live code tree**, read this session. Where the code and an existing `.md` disagree on a number, the code wins and the discrepancy is flagged inline (see the closing note for the reconciliation list). The project's canonical science notes live in the Obsidian vault; the repo's `ARCHITECTURE.md` and `docs/science_reference.md` are one-line stubs, so this doc cites source lines, not those stubs.
+This document reflects the **live code tree**. **Reconciled 2026-07-11:** since the 2026-07-06 draft, three sections advanced in the tree and are updated below — the dNBR arm is now **wired** into production (A34, §6–§7), the coastal-slope nodata-ring drop **shipped** (A33 + the F4 slope-coverage flag, §4), and the pysheds flow model gained an independent **pyflwdir cross-check** (CF-11, §3). Where the code and an existing `.md` disagree on a number, the code wins and the discrepancy is flagged inline. The project's canonical science notes live in the Obsidian vault; the repo's `ARCHITECTURE.md` and `docs/science_reference.md` are one-line stubs, so this doc cites source lines, not those stubs.
 
 ---
 
@@ -18,7 +18,7 @@ This document reflects the **live code tree**, read this session. Where the code
 4. [Slope (deep)](#4-slope-deep)
 5. [Outlet detection and catchment delineation (deep)](#5-outlet-detection-and-catchment-delineation-deep)
 6. [Burn severity to weight, and the coverage-weighted mean (deep)](#6-burn-severity-to-weight-and-the-coverage-weighted-mean-deep)
-7. [The dNBR burn-source arm: built, tested, not yet wired (deep)](#7-the-dnbr-burn-source-arm-built-tested-not-yet-wired-deep)
+7. [The dNBR burn-source arm: built, tested, wired (deep)](#7-the-dnbr-burn-source-arm-built-tested-wired-deep)
 8. [The frozen score and within-fire ranking (deep)](#8-the-frozen-score-and-within-fire-ranking-deep)
 9. [Terrain-applicability refusal: the hypsometric gate (deep)](#9-terrain-applicability-refusal-the-hypsometric-gate-deep)
 10. [Validation algorithms (brief-to-medium)](#10-validation-algorithms-brief-to-medium)
@@ -145,11 +145,13 @@ The same `DIRMAP` is passed to both `flowdir` and `accumulation` so the encoding
 
 `stage_2a_hydrology` wraps this call and adds the **master-outlet linchpin** ([pipeline.py:177-180](../src/pipeline.py#L177-L180)): the domain pour-point is the max-accumulation cell (`np.argmax`), and its catchment is delineated in index mode. That area (44.73 km² on Montecito) is the anti-0 km² sanity check described in Section 5.
 
+**Independent cross-check (CF-11).** The whole pysheds routing is corroborated by an independent flow engine: [validation/cf11_pyflwdir_crosscheck.py](../validation/cf11_pyflwdir_crosscheck.py) reruns the per-outlet contributing areas through **pyflwdir** (Deltares) and gets **Pearson 0.9994** against pysheds, with the large (≥1 km²) basins that drive the ranking agreeing to a median ratio ~1.00 (max deviation ~3%). Locked as a confidence test ([tests/test_pyflwdir_crosscheck.py](../tests/test_pyflwdir_crosscheck.py)); it scores nothing the pipeline consumes. Two independent engines reproducing the same areas is the empirical backing for the contributing-area term. (The one documented divergence — the whole-grid master, pyflwdir ~113 km² vs pysheds ~45 — is a coastal-edge / undeclared-nodata artifact the pipeline never scores.)
+
 ---
 
 ## 4. Slope (deep)
 
-**File:** [pipeline.py:204-214](../src/pipeline.py#L204-L214)
+**File:** [pipeline.py:229-259](../src/pipeline.py#L229-L259) (`mean_slope_tan`)
 
 ### The method: as actually coded
 
@@ -166,13 +168,13 @@ Steeper burned slopes mobilize debris more easily: gravity does more of the work
 
 We measure steepness as **rise over run** (`tan` of the slope angle), computed from the elevation grid itself. For each cell we look at how fast elevation changes going east-west and north-south, and combine those into a single steepness number. A value of 0 is flat; a value near 0.6 corresponds to a basin averaging about 31 degrees, which is what the steep Montecito catchments actually show. The tool reports the **mean** steepness across a basin, so a small very-steep gully and a large gentle fan get different, physically-sensible slope terms.
 
-One honest caveat the code carries: this slope pass reads the raw DEM with no valid-cell mask. On a normal inland fire that is fine. On a **coastal** DEM, a land cell next to an ocean/nodata cell (which pysheds clamps to elevation 0) reads a spurious cliff and inflates that basin's slope. There is no coastal fire in scope and no fixture that can exercise it, so this is recorded as a P3 hazard note (decision **A33**) and deliberately not "fixed" blind. Until a real coastal case exists, the tool has no coastal-slope guarantee.
+One honest edge the code now handles: on a **coastal** DEM, a land cell next to an ocean/nodata cell (which pysheds clamps to elevation 0) would read a spurious cliff and inflate that basin's slope. This is **fixed** (decision **A33**, committed `ebc1e06`): when a nodata sentinel is present, `mean_slope_tan` drops the nodata-adjacent **ring** to NaN at source (the contamination lives in the valid land cell whose gradient consumed a 0-clamped neighbour, so masking at the mean would not remove it), and the per-basin mean is taken over the clean (non-NaN) cells only. A companion **F4** diagnostic (`slope_coverage_frac` / `low_slope_coverage < 0.80`) flags a basin scored on a small clean remnant. Montecito is inland → no NaN → the behavior lock is byte-identical. (Earlier drafts recorded this as a deferred P3 hazard note; the owner overrode the deferral and shipped the fix with a synthetic coastal fixture.)
 
 ### For the Programmer
 
 `np.gradient(dem_raw, CELL_M, CELL_M)` uses central differences in the interior and one-sided differences at the edges, with the spacing argument `CELL_M = 10.0` m applied to both axes, so `gx`/`gy` come out dimensionless (metres of rise per metre of run). `np.hypot(gx, gy)` is the L2 magnitude, i.e. `tan(theta)`. Owner-confirmed to reproduce the reconstruction's `mean_slope` column to within 0.01, which is why it is frozen as-is rather than swapped for Horn's 8-neighbour method.
 
-Units discipline matters here: the term is `tan`, not degrees and not percent. The `science_reference` "0-1 transport-energy proxy" phrase is a typical-range description, not a hard clamp; `tan` stays below 1 only because mean basin slopes sit around 31 degrees. No masking is applied (see the A33 caveat above), so every cell in the DEM gets a slope, and the per-basin reduction happens later in `score` over the basin mask only.
+Units discipline matters here: the term is `tan`, not degrees and not percent. The `science_reference` "0-1 transport-energy proxy" phrase is a typical-range description, not a hard clamp; `tan` stays below 1 only because mean basin slopes sit around 31 degrees. Masking is applied at the nodata edge only (the A33 ring-drop above, via the shared `_valid_dem_mask` the A25/A27 guards use); every other cell gets a slope, and the per-basin reduction happens later in `score` over the clean basin-mask cells (an all-NaN basin fails loud, A8, like the A32 empty-mask guard).
 
 ---
 
@@ -253,7 +255,7 @@ select_burn_source(sbs):
 ingest_burn(burn_path):
     sbs = load_burn(burn_path)
     source = select_burn_source(sbs)
-    if source != "SBS": raise GateAbort(...)                 # A29 fail-loud (dNBR arm not yet wired)
+    if source != "SBS": raise GateAbort(...)                 # A29 fail-loud on PARTIAL-SBS (dNBR-only fires route via ingest_dnbr_both_arms, A34)
     wt, covered = _burn_weight_raster(sbs)                   # A17 weights + A18 coverage
     provenance = {"burn_source": source}                    # A4: ONE stamp, read everywhere
     return wt, covered, provenance
@@ -269,7 +271,7 @@ Severity classes become a 0-to-1 weight: unburned/very-low = 0.0, low = 0.33, mo
 
 ### For the Programmer
 
-`SBS_CODESET = (0, 1, 2, 3, 4, 15)` ([ingest.py:38](../src/ingest.py#L38)) is the validity test: `sbs.tif` declares no rasterio nodata, so codeset membership (not a GDAL mask) defines "covered the AOI." Class 15 (outside-perimeter) counts as covered ("assessed: outside the burn"), an owner decision. `select_burn_source` returns `"dNBR"` for a partial-SBS AOI, but `ingest_burn` guards that and fails loud, because the dNBR end-to-end arm is built but not wired (A29; Section 7). Without the guard, `_burn_weight_raster` would score the SBS raster while stamping a `"dNBR"` provenance, a silent mislabel.
+`SBS_CODESET = (0, 1, 2, 3, 4, 15)` ([ingest.py:38](../src/ingest.py#L38)) is the validity test: `sbs.tif` declares no rasterio nodata, so codeset membership (not a GDAL mask) defines "covered the AOI." Class 15 (outside-perimeter) counts as covered ("assessed: outside the burn"), an owner decision. `select_burn_source` returns `"dNBR"` for a partial-SBS AOI. The dNBR end-to-end arm is now **wired** (A34; Section 7): a dNBR-only fire (`sbs=None` + a native dNBR raster) is routed through `ingest_dnbr_both_arms` in the pipeline, not through this SBS seam. `ingest_burn` itself still fails loud (A29) when a **partial-SBS** raster reaches it — that guard is still correct, because a partial SBS is ambiguous (a genuine straddle vs a broken/clipped raster), and without it `_burn_weight_raster` would score the SBS raster while stamping a `"dNBR"` provenance, a silent mislabel.
 
 `_burn_weight_raster` ([ingest.py:118-131](../src/ingest.py#L118-L131)) zero-inits `wt`, loops `BURN_WEIGHTS` to set classes 1-4, leaves 0/15 at 0.0, and computes `covered = np.isin(sbs, (1,2,3,4))`. It moved here verbatim from `score.py` in P2.2a so the weight raster and coverage mask are produced once at ingest; `score` consumes them.
 
@@ -287,11 +289,11 @@ b["low_coverage"] = b["burn_coverage_frac"] < BURN_LOW_COVERAGE   # 0.80
 
 ---
 
-## 7. The dNBR burn-source arm: built, tested, not yet wired (deep)
+## 7. The dNBR burn-source arm: built, tested, wired (deep)
 
 **File:** [ingest.py:167-298](../src/ingest.py#L167-L298)
 **Constants:** `DNBR_BIN_EDGES`, `DNBR_CLAMP`, `DNBR_FLOOR` at [config.py:32-38](../src/config.py#L32-L38)
-**Status:** implemented and unit-tested against hand-computed known-answers ([tests/test_dnbr_arm.py](../tests/test_dnbr_arm.py)), but **not wired into `ingest_burn`**. `ingest_burn` fails loud on any non-SBS selection (A29). Full end-to-end dispatch is deferred to P2.2c. Documented here because the code is live in the tree and its constants are on the frozen fence; it does not run on Montecito.
+**Status:** implemented, unit-tested against hand-computed known-answers ([tests/test_dnbr_arm.py](../tests/test_dnbr_arm.py)), and **now wired end-to-end** (A34, committed `a523dde`; P2.2c). A dNBR-only fire (`sbs=None` + a native dNBR raster) is dispatched through `ingest_dnbr_both_arms` and scored through **both arms** — Arm A (binned) is the headline ranking, Arm B (continuous) rides alongside with `rank_delta = |rankA − rankB|` as an honest uncertainty flag ([outputs.py:181](../src/outputs.py#L181), `write_dnbr_outputs`). `ingest_burn`'s A29 guard now fires only on a **partial-SBS** raster (§6). The bin/clamp/floor constants remain on the frozen fence. Validation: the Montecito dNBR both-arms run reproduces the P2.3 swap-test oracle (rank-AUC 0.9722, both arms), and the dNBR ranking is carried as **triage-validated, not exact-rank-validated** (n=1 — the pre-registered exact-#1 criterion missed by 1.03%); that n=1 framing is stamped on every dNBR artifact.
 
 The bin edges, clamp, floor, and the 5→4 collapse are pre-registered in [validation/P2_PREREGISTRATION.md](../validation/P2_PREREGISTRATION.md) and frozen: a value that "looks off" is a P2.3 finding, never a P2.2b edit.
 
@@ -329,11 +331,11 @@ Linear on purpose: a power curve would be a tunable. The `0.100` lower clamp is 
 
 BAER soil burn severity is field-validated but only exists for fires someone assessed. dNBR is a satellite "how much did the landscape change" index available for any fire, anywhere, for free. That makes it the natural production input for the un-assessed fires this tool targets. But dNBR is a continuous vegetation-change signal, not a 4-class soil product, so the pipeline has to convert it. The primary path bins dNBR into the same four severity classes SBS uses (so the rest of the math is identical), using published break points taken literally with zero adjustment. A companion path maps dNBR straight to a 0-to-1 number as a robustness check. Both share the same "below 0.1 is outside the burn" floor.
 
-This arm is written and unit-tested but not yet switched on: today a fire without full SBS coverage is refused loudly rather than scored under a dNBR label the pipeline can't yet honestly stamp. That is the fail-loud spine choosing a clear stop over a plausible-looking guess.
+This arm is now switched on: a fire without SBS is scored on dNBR and stamped honestly as `burn_source=dNBR`, with the binned (Arm A) ranking as the headline and the continuous (Arm B) ranking alongside as a robustness companion. Because it has been validated on only one fire, every dNBR output carries a loud "triage-validated, not exact-rank-validated (n=1)" caveat — the fail-loud spine keeping the honest limitation visible rather than hidden.
 
 ### For the Programmer
 
-`reproject_dnbr` ([ingest.py:167-196](../src/ingest.py#L167-L196)) snaps native dNBR onto the DEM grid via explicit `dst_transform`/`dst_shape` (never the dNBR scene's own grid), Arm A with `Resampling.nearest`, Arm B with `Resampling.bilinear`. `ingest_dnbr_both_arms` ([ingest.py:243-298](../src/ingest.py#L243-L298)) derives one shared valid footprint from Arm A's nearest reproject and applies it to both arms, so A and B are byte-identical in footprint by construction; `assert_aligned` runs on both before any thresholding, and a fail-loud guard rejects any non-finite/sentinel value inside the valid footprint. The known-answer tests pin every bin boundary (0.100 left-closed to class 2, 0.440 collapsing to class 3, and so on), the linear Arm-B transfer, the shared floor, and the NaN-routing defect.
+`reproject_dnbr` ([ingest.py:167-196](../src/ingest.py#L167-L196)) snaps native dNBR onto the DEM grid via explicit `dst_transform`/`dst_shape` (never the dNBR scene's own grid), Arm A with `Resampling.nearest`, Arm B with `Resampling.bilinear`. Sensor note: the committed dNBR raster is **Landsat 30 m** (a 3× upsample onto the 10 m grid), **not** the 20 m Sentinel-2 the pre-registration originally assumed — a documented sensor caveat (A21/A4), carried raw-scale (never ×1000). `ingest_dnbr_both_arms` ([ingest.py:243-298](../src/ingest.py#L243-L298)) derives one shared valid footprint from Arm A's nearest reproject and applies it to both arms, so A and B are byte-identical in footprint by construction; `assert_aligned` runs on both before any thresholding, and a fail-loud guard rejects any non-finite/sentinel value inside the valid footprint. The known-answer tests pin every bin boundary (0.100 left-closed to class 2, 0.440 collapsing to class 3, and so on), the linear Arm-B transfer, the shared floor, and the NaN-routing defect.
 
 ---
 
