@@ -33,7 +33,7 @@ _REPO_ROOT = Path(__file__).resolve().parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from src.grids import GateAbort
-from src.outputs import SCREENING_STATEMENT, DNBR_FRAMING
+from src.outputs import SCREENING_STATEMENT
 
 # |rankA - rankB| at/above which a basin is flagged "rank uncertain" (display heuristic, Tier-2, not
 # a science value): the honest surfacing of Arm A / Arm B disagreement (A34 rank_delta).
@@ -262,7 +262,6 @@ def main():
     st.set_page_config(page_title="Post-Fire Watershed Screening", layout="wide")
     st.title("Post-Fire Debris-Flow Watershed Screening")
     st.info(SCREENING_STATEMENT)                 # the spine (A11), always visible
-    st.caption(DNBR_FRAMING)                      # dNBR n=1 framing (A34)
     st.markdown("**1.** Draw a box on the map (or type coordinates) · **2.** upload a raw dNBR "
                 "GeoTIFF · **3.** run. Elevation and buildings are fetched automatically.")
 
