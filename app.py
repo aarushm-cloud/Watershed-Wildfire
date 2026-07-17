@@ -82,13 +82,18 @@ def result_to_view(result: dict) -> dict:
 
 
 def basin_rows(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA) -> list:
-    """basins.geojson -> display rows sorted by the Arm A headline rank, with the rank_delta
-    'uncertain' flag (Arm A vs Arm B disagreement, A34)."""
+    """basins.geojson -> display rows sorted by the Arm A headline rank. Columns are ordered so the
+    frozen score reads left-to-right as its own inputs -- mean_burn x mean_slope x area_km2 -> score
+    -- making the ranking auditable. Burn is the Arm A binned value (the term the headline score uses);
+    slope + area are identical across arms. Carries the rank_delta 'uncertain' flag (A34)."""
     rows = []
     for feat in fc.get("features", []):
         p = feat.get("properties", {})
         delta = p.get("rank_delta", abs((p.get("rank") or 0) - (p.get("rank_b") or 0)))
-        rows.append({"basin_id": p.get("basin_id"), "rank": p.get("rank"), "score": p.get("score"),
+        rows.append({"basin_id": p.get("basin_id"), "rank": p.get("rank"),
+                     "mean_burn": p.get("mean_burn_a", p.get("mean_burn")),   # Arm A binned burn (headline)
+                     "mean_slope": p.get("mean_slope"), "area_km2": p.get("area_km2"),
+                     "score": p.get("score"),
                      "rank_b": p.get("rank_b"), "score_b": p.get("score_b"),
                      "rank_delta": delta, "uncertain": delta >= uncertain_delta})
     rows.sort(key=lambda r: (r["rank"] is None, r["rank"]))
@@ -325,7 +330,37 @@ def main():
     st_folium(build_basin_map(fc), height=520, use_container_width=True, key="result_map")
     st.caption("Fill = Arm A screening rank (hot = higher priority). **Blue dashed outline = Arm A "
                "and Arm B disagree on rank** — treat that basin as rank-uncertain.")
-    st.dataframe(basin_rows(fc), use_container_width=True)
+
+    with st.expander("How to read this"):
+        st.markdown(
+            f"- **What this is** — {SCREENING_STATEMENT}\n"
+            "- **Map fill** — hot red = rank 1 (highest screening priority); pale = lowest rank.\n"
+            "- **Blue dashed outline** — Arm A (binned) and Arm B (continuous) disagree on rank; "
+            "treat that basin as rank-uncertain.\n"
+            "- **Score** — the frozen `mean burn × mean slope × contributing area`, a within-fire "
+            "ordinal ranking only (not comparable across fires).\n"
+            "- **A refusal instead of a ranking** — on incised-valley terrain with no mountain-front "
+            "break there are no canyon mouths to anchor to, so the tool refuses rather than force a "
+            "ranking. A known boundary of the method, not a failure."
+        )
+
+    # B: surface the frozen score's inputs (burn x slope x area) beside the score so the ranking is
+    # auditable; readable headers via column_config (the score carries the formula as a tooltip).
+    st.dataframe(
+        basin_rows(fc), use_container_width=True,
+        column_config={
+            "basin_id": "Basin", "rank": "Rank (Arm A)",
+            "mean_burn": st.column_config.NumberColumn("Mean burn (Arm A)", format="%.4f"),
+            "mean_slope": st.column_config.NumberColumn("Mean slope", format="%.4f"),
+            "area_km2": st.column_config.NumberColumn("Area (km²)", format="%.4f"),
+            "score": st.column_config.NumberColumn(
+                "Score", help="= mean burn × mean slope × area (frozen; within-fire ordinal)"),
+            "rank_b": "Rank (Arm B)", "score_b": "Score (Arm B)",
+            "rank_delta": "Rank Δ", "uncertain": "Rank-uncertain",
+        },
+    )
+    st.caption("Screening score = mean burn severity × mean slope × contributing area (km²) — the "
+               "frozen formula, ranked within this fire only. Not a probability or a prediction.")
     st.download_button("Download ranking.csv", screen["csv"],
                        file_name="ranking.csv", mime="text/csv")
 

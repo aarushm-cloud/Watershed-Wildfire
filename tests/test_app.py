@@ -34,12 +34,13 @@ from src.grids import GateAbort  # noqa: E402
 SFK_BBOX = (-105.791562, 33.325515, -105.636136, 33.413521)   # W, S, E, N (valid)
 
 
-def _feature(basin_id, rank, rank_b, score=1.0):
+def _feature(basin_id, rank, rank_b, score=1.0, mean_burn=0.5, mean_slope=0.3, area_km2=1.2):
     # a 0.01-degree square somewhere in the AOI; geometry only needs to be a valid polygon
     x, y = -105.7 + rank * 0.01, 33.35
     return {"type": "Feature",
             "properties": {"basin_id": basin_id, "rank": rank, "score": score,
-                           "rank_b": rank_b, "score_b": score, "rank_delta": abs(rank - rank_b)},
+                           "rank_b": rank_b, "score_b": score, "rank_delta": abs(rank - rank_b),
+                           "mean_burn_a": mean_burn, "mean_slope": mean_slope, "area_km2": area_km2},
             "geometry": {"type": "Polygon",
                          "coordinates": [[[x, y], [x + 0.01, y], [x + 0.01, y + 0.01],
                                           [x, y + 0.01], [x, y]]]}}
@@ -110,6 +111,16 @@ def test_basin_rows_sorted_by_arm_a_rank_with_uncertainty_flag():
     assert [r["basin_id"] for r in rows] == ["b_lo", "b_hi"]     # sorted by Arm A rank
     assert rows[0]["rank_delta"] == 1 and rows[0]["uncertain"] is False
     assert rows[1]["rank_delta"] == 5 and rows[1]["uncertain"] is True
+
+
+def test_basin_rows_surfaces_frozen_formula_terms_in_product_order():
+    # B: the table exposes the frozen score's inputs (mean_burn x mean_slope x area_km2 -> score) in
+    # that left-to-right order, so a viewer can audit the ranking. Burn is the Arm A binned value.
+    fc = _fc(_feature("b1", rank=1, rank_b=1, mean_burn=0.6, mean_slope=0.4, area_km2=2.0))
+    row = basin_rows(fc)[0]
+    assert (row["mean_burn"], row["mean_slope"], row["area_km2"]) == (0.6, 0.4, 2.0)
+    keys = list(row.keys())
+    assert keys.index("mean_burn") < keys.index("mean_slope") < keys.index("area_km2") < keys.index("score")
 
 
 # ---- build_basin_map (smoke) -------------------------------------------------------------------
