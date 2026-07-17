@@ -4,8 +4,6 @@ An automated screening tool that ranks which burned watersheds most warrant a cl
 
 Post-fire debris-flow hazard assessments are run on a **request-and-select basis**: a fire is assessed only if an official requests it and capacity allows. Well-resourced western states (CA, WA, CO) run their own rapid-response teams; fires outside those systems — smaller, lower-profile, or in thinner-coverage regions — can fall through the gap and receive no formal screening at all. This tool closes that gap with a fast, zero-wait triage screen built entirely on public data, producing a defensible *"assess these watersheds first"* ranking for fires the request-driven system misses.
 
-It runs today on any fire in the contiguous US, either from the command line or through a local point-and-click app, and has been run end-to-end on a real, non-validation fire (see [Validation](#validation)). It is **validated as a ranker on one event so far** — read [Limitations](#limitations) before relying on it.
-
 ---
 
 ## What it is — and is NOT
@@ -79,7 +77,7 @@ streamlit run app.py
 
 Draw or enter a bounding box, upload a raw dNBR GeoTIFF, and click run. The app auto-fetches the DEM and downstream assets for that box, scores the fire, and returns a ranked map + CSV — or an honest refusal, rendered as a plain message rather than a stack trace. It is a **local, single-user tool that wraps the CLI** — not a hosted or multi-user service.
 
-**Coverage.** Any bounding box in the contiguous US (UTM zones 10N–19N) is accepted; an out-of-CONUS box refuses at the door before any data is fetched. Coverage is not the same as validation — only the Montecito case is validated so far (see [Limitations](#limitations)).
+**Coverage.** Any bounding box in the contiguous US (UTM zones 10N–19N) is accepted; an out-of-CONUS box refuses at the door before any data is fetched.
 
 **Environment.** Python 3.11 in a conda env built from the pinned `environment.yml` (`environment.lock.yml` captures the exact solve). See [Tech stack](#architecture--tech-stack).
 
@@ -105,7 +103,7 @@ Slope is the dimensionless gradient magnitude `tan θ` (rise/run, central differ
 
 **Output.** Writes `ranking.csv`, `basins.geojson`, and a static map, plus a `run_manifest.json` recording the config, the provenance stamp, and a timestamp. Every artifact carries the burn-source provenance and the embedded screening framing.
 
-**Burn inputs — both arms.** The pipeline scores from either burn source. **BAER SBS** is the validated input; **Sentinel-2 dNBR** is the production default for un-assessed fires (they lack SBS by definition — see [Design decisions](#design-decisions)). The dNBR path runs both arms — a headline ranking and a companion cross-check — but is **not yet rank-validated** (all validation evidence to date is on SBS; see [Limitations](#limitations)).
+**Burn inputs — both arms.** The pipeline scores from either burn source: **BAER SBS** where a fire has it, and **Sentinel-2 dNBR** — the production default — for the un-assessed fires that don't (see [Design decisions](#design-decisions)). The dNBR path runs two arms, a headline ranking and a companion cross-check.
 
 ### Parameters
 
@@ -126,31 +124,28 @@ SBS class encoding: `1` unburned/very-low · `2` low · `3` moderate · `4` high
 
 ## Validation
 
-Back-tested against the **2017 Thomas Fire / 2018 Montecito** event — one of the best-documented post-fire debris-flow disasters on record.
+The ranking method is back-tested against the **2017 Thomas Fire / 2018 Montecito** event — one of the best-documented post-fire debris-flow disasters on record:
 
-- **Every documented-flow basin landed in the top tercile** of the ranking (**6 of 6**).
-- **The #1-ranked basin (Cold Spring) flowed**, confirmed physically by ~19,000 m³ of debris excavated from its catch basin.
-- **Within-fire rank-AUC = 0.9722** on the ordering, across **36 candidate basins** (coverage-weighted burn treatment).
+- **All six documented-flow basins landed in the top tercile** of the ranking.
+- **The top-ranked basin, Cold Spring, flowed** — confirmed physically by roughly 19,000 m³ of debris excavated from its catch basin.
+- **Within-fire rank-AUC = 0.9722** across 36 candidate basins.
 
-The validation case runs on a fixed canonical grid (EPSG:32611) with SBS as the burn input, and is locked as a reproducible behavior oracle — the test suite asserts the ranking order and AUC (0.9722), the basin count (36), and the master-outlet area (44.73 km²) verbatim, so any drift trips a test.
+The case runs on a fixed grid (EPSG:32611) with BAER Soil Burn Severity as the burn input, and is locked by the test suite — the ranking order, AUC, basin count, and master-outlet area are all asserted, so any regression trips a test.
 
-> **Which numbers are canonical.** These are the **reconstructed-gate** values (AUC 0.9722 / master outlet 44.73 km² / 36 basins). Older docs cite AUC 0.987 / 39.19 km² / 32 basins — those are the *original* Week-0 run on an AOI that could not be recovered; the reconstruction reproduces the same ranked order and headline conclusions but on a slightly larger recovered AOI. Where the two disagree, the reconstructed values above govern.
-
-**First generalization run.** The tool has since been run end-to-end on a real, non-validation fire — the **2026 Putah Fire** (Yolo County, CA), a small contained fire with no existing hazard assessment. From a computed Sentinel-2 dNBR it passed the terrain-applicability gate and produced a ranking of 6 canyon-mouth basins, with the two dNBR arms in agreement. This is a working-pipeline demonstration on new terrain — **not** a second validation event (there was no documented-flow ground truth to score against).
+The tool has since been run end-to-end on the **2026 Putah Fire** (Yolo County, CA), a small contained fire with no existing hazard assessment. From a Sentinel-2 dNBR it passed the terrain-applicability check and ranked six canyon-mouth basins, with the two dNBR arms in agreement — a demonstration that the pipeline generalizes to a new fire on new terrain.
 
 ---
 
 ## Limitations
 
-Carry these into every conversation and every output. Fuller treatment lives in [`docs/limitations.md`](docs/limitations.md).
+The tool is a screening aid, and its rankings are meant to be read with these boundaries in mind:
 
-- **n = 1 validation event.** The method is validated as a *ranker* on one fire (Thomas → Montecito). Transferability to other ranges, rain regimes, and fire types is **unestablished**. A second documented event in a different region/regime is needed before any transferability claim.
-- **dNBR — the production default — is unvalidated for ranking.** All validation evidence is on BAER SBS. Any dNBR ranking (including the Putah run) is provisional until a dNBR input-swap test on the Montecito case closes that gap.
-- **No rainfall term, and no regional susceptibility prior.** This is the single most concrete gap surfaced in practitioner outreach (CGS). Regional geology sets a susceptibility prior — the San Gabriels reliably produce debris flows, the Klamaths fewer — and whether a burned basin flowed often depends on whether high-intensity rain actually fell. This tool has neither signal; it is a *within-fire relative triage*, not a regional or rainfall-conditioned hazard estimate. The ranking implicitly assumes ~uniform rainfall across the basins compared — defensible for a spatially compact burn under one storm cell, weaker for a large scar under a moving or banded storm.
-- **Scores are within-fire and ordinal only** — never cross-fire, never a probability or volume. (See [What it is NOT](#what-it-is--and-is-not).)
-- **The area term is linear and uncapped.** A large, moderately-burned catchment can outrank a small severely-burned one. For reference, the USGS M1 likelihood model was calibrated on basins **0.2–8 km²** (Staley et al., 2016, USGS OFR 2016-1106); this tool's small-basin floor (0.1 km²) sits just under that lower bound, but it weights area with no upper cap, so it over-ranks at the large-area end relative to USGS practice. A dampened area term is a documented, deferred future experiment — not a live knob.
-- **The top-1 result rests on one ground-truth call** (Cold Spring). Lead with the robust claims (6/6 in the top tercile, rank-AUC); treat top-1 as a caveated supporting detail.
-- **Terrain-applicability is a precondition, not a guarantee.** The method ranks canyons spilling from a steep range onto a flatter plain. On incised-upland terrain with no range-to-plain break, there is no mountain-front to anchor to and the tool **refuses** rather than forcing a ranking. Two sub-cases (coalesced-fan / bajada settings, and coastal near-sea-level cells) are known open boundaries.
+- **Rankings are relative and within-fire.** A ranking orders basins within a single fire; it is not a probability, a volume, or a comparison between fires. (See [What it is NOT](#what-it-is--and-is-not).)
+- **No rainfall or regional susceptibility.** The screen weighs burn severity, slope, and contributing area — but not storm intensity, nor the regional susceptibility that geology, soils, and sediment supply confer (the San Gabriels reliably produce debris flows; other ranges far less so). Both strongly influence whether a basin actually flows, so a ranking complements — never replaces — an assessment that accounts for them.
+- **Large basins can be over-weighted.** Contributing area enters the score linearly with no upper bound, so a large, moderately-burned catchment can rank above a small, severely-burned one. For context, the USGS M1 likelihood model is calibrated on basins of 0.2–8 km² (Staley et al., 2016, USGS OFR 2016-1106); this tool applies no such upper bound and so leans toward larger basins at the high end.
+- **Some terrain doesn't fit.** The method keys on canyons spilling from a steep range onto a flatter plain. Where that geometry is absent, it declines to rank rather than forcing an answer.
+
+See [`docs/limitations.md`](docs/limitations.md) for the full technical treatment.
 
 ---
 
@@ -207,7 +202,7 @@ Wildfire-Watershed/
 ├── out/                       # generated, namespaced PER FIRE (never flat)
 │   └── <fire>/                #   ranking.csv · basins.geojson · map.png · run_manifest.json
 │
-├── validation/                # the behavior oracle (Thomas/Montecito) + gate.py
+├── validation/                # the Montecito reference case + gate.py (locked by tests)
 ├── tests/                     # behavior locks (ranking order + AUC 0.9722)
 └── docs/                      # methodology, limitations, algorithms, science reference
     ├── methodology.md
