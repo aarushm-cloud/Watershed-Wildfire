@@ -173,7 +173,7 @@ def assess_hypsometric_applicability(dem_raw: np.ndarray, dem_nodata) -> dict:
 # ---------------------------------------------------------------------------
 # 2b -- canyon-mouth outlets
 # ---------------------------------------------------------------------------
-def stage_2b_outlets(acc, fdir, dem_raw, shape) -> list[tuple[int, int]]:
+def stage_2b_outlets(acc, fdir, dem_raw, shape, *, contour_m: float = CONTOUR_M) -> list[tuple[int, int]]:
     """Channel cells (acc > threshold) that cross the CONTOUR_M mountain-front contour going downhill.
 
     A channel cell with raw elevation >= CONTOUR_M whose D8-downstream neighbour's raw
@@ -187,13 +187,13 @@ def stage_2b_outlets(acc, fdir, dem_raw, shape) -> list[tuple[int, int]]:
     channel = acc > ACC_THRESHOLD_CELLS
 
     outlets: list[tuple[int, int]] = []
-    cand_rows, cand_cols = np.where(channel & (dem_raw >= CONTOUR_M))
+    cand_rows, cand_cols = np.where(channel & (dem_raw >= contour_m))
     for r, c in zip(cand_rows.tolist(), cand_cols.tolist()):
         off = D8_OFFSETS.get(int(fdir[r, c]))
         if off is None:
             continue
         nr, nc = r + off[0], c + off[1]
-        if 0 <= nr < nrows and 0 <= nc < ncols and dem_raw[nr, nc] < CONTOUR_M:
+        if 0 <= nr < nrows and 0 <= nc < ncols and dem_raw[nr, nc] < contour_m:
             outlets.append((r, c))
 
     if not outlets:

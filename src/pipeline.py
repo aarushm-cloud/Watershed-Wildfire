@@ -42,6 +42,7 @@ from src.config import (
     MASTER_MIN_AOI_FRACTION,
     DIRMAP,
     DNBR_NODATA_FAILLOUD_FRAC,
+    CONTOUR_M,
 )
 # Shared fail-loud exception + coordinate/CRS helpers (src/grids.py). assert_aligned is the DEM/SBS
 # alignment check; test_entrypoint's expected_crs recorder monkeypatches THIS module's binding of it.
@@ -478,7 +479,7 @@ def _score_one_arm(basins_src, wt, covered, slope, creek_nearest, covered_interp
 # ---------------------------------------------------------------------------
 # pipeline driver (2a -> 2f) + determinism + perturbation
 # ---------------------------------------------------------------------------
-def run_pipeline(fire=None):
+def run_pipeline(fire=None, contour_m=None):
     """Run 2a -> 2f at the frozen TRUTH_MATCH_M. Returns a results dict.
 
     fire -- per-fire I/O + provenance dict (A30). None -> MONTECITO_FIRE, so the no-arg call is
@@ -486,6 +487,9 @@ def run_pipeline(fire=None):
     scalar stays global/frozen in src/config.py.
     """
     fire = fire if fire is not None else MONTECITO_FIRE
+    # A25/B2: per-fire mountain-front contour. None -> the frozen config default (150 m, Montecito) so
+    # the no-arg / default call stays byte-identical; app.py passes the operator's per-fire value.
+    contour_m = contour_m if contour_m is not None else CONTOUR_M
 
     # A31: load the DEM ONCE, up front -- before the terrain gate and before hydrology. Lifting the DEM
     # read out of stage_2a lets the A27 terrain-applicability gate refuse on the raw DEM ALONE, before
@@ -511,9 +515,9 @@ def run_pipeline(fire=None):
     # A25 carve-out: fail loud if CONTOUR_M is grossly mis-set for this DEM BEFORE detecting outlets
     # (else a wrong-fire contour silently yields zero/wrong canyon mouths). Montecito 150 m is inside
     # [~0, 1199] m -> passes; runs on the same dem_raw the contour test uses. src/delineate.py
-    assert_contour_in_dem_range(hydro["dem_raw"], hydro["dem_nodata"])
+    assert_contour_in_dem_range(hydro["dem_raw"], hydro["dem_nodata"], contour_m=contour_m)
     # unpack hydro at the call site (dict-key coupling stays here, not in delineate); src/delineate.py
-    outlets = stage_2b_outlets(hydro["acc"], hydro["fdir"], hydro["dem_raw"], hydro["shape"])
+    outlets = stage_2b_outlets(hydro["acc"], hydro["fdir"], hydro["dem_raw"], hydro["shape"], contour_m=contour_m)
     assets = load_assets(fire["assets"])     # GeoDataFrame; src/ingest.py
     _assert_metric_crs(assets.crs, "assets.geojson")
     asset_xy = np.column_stack([assets.geometry.x.values, assets.geometry.y.values])

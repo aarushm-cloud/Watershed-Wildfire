@@ -161,7 +161,7 @@ def screen_inputs_key(west, south, east, north, dnbr_file):
             round(float(east), _BBOX_DP), round(float(north), _BBOX_DP), f)
 
 
-def run_screening(bbox_raw, dnbr_file, *, name="frontend"):
+def run_screening(bbox_raw, dnbr_file, *, name="frontend", contour_m=150.0):
     """One screening run end-to-end -> the screen dict main() stores in session_state
     (kind: ranked | refused | error).
 
@@ -187,7 +187,7 @@ def run_screening(bbox_raw, dnbr_file, *, name="frontend"):
         dnbr_path = out_dir / "dnbr_upload.tif"
         dnbr_path.write_bytes(dnbr_file.getvalue())
         fire = build_fire_config(bbox, dnbr_path, out_dir, name=name)
-        result = run_pipeline(fire)
+        result = run_pipeline(fire, contour_m=contour_m)
         view = result_to_view(result)
         if view["kind"] == "ranked":
             csv_path, gj_path = write_dnbr_outputs(
@@ -282,6 +282,12 @@ def main():
         east = st.number_input("East (lon)", value=float(drawn[2]), format=f"%.{_BBOX_DP}f")
         north = st.number_input("North (lat)", value=float(drawn[3]), format=f"%.{_BBOX_DP}f")
         dnbr_file = st.file_uploader("dNBR GeoTIFF (raw scale, ~ -1..1)", type=["tif", "tiff"])
+        # B2: per-fire mountain-front contour (m) -- the elevation where canyons discharge onto the
+        # depositional plain. Guard-checked against THIS fire's DEM range (not a frozen scalar; an
+        # operator input defaulted to the Montecito value). Inland high-elevation fires need ~1900.
+        contour_m = st.number_input("Mountain-front contour (m)", value=150.0, step=10.0,
+                                    help="Range-front break elevation for THIS fire "
+                                         "(Montecito ~150; Cooks Peak ~1900; Deer Canyon ~1910).")
         run = st.button("Run screening", type="primary")
 
     # Identity of the CURRENT form inputs -- computed every rerun, used both to stamp a fresh result
@@ -302,7 +308,7 @@ def main():
     # the container below so it persists across the reruns st_folium/download trigger.
     if run:
         with st.spinner("Fetching DEM + buildings and scoring both dNBR arms..."):
-            screen = run_screening((west, south, east, north), dnbr_file)
+            screen = run_screening((west, south, east, north), dnbr_file, contour_m=contour_m)
             screen["inputs"] = inputs_key
             box.clear(); box.update(screen)          # store INSIDE the spinner, BEFORE its exit yields --
             #   plain dict mutation with no yield point between the finished run and the store (F1)
