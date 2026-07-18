@@ -151,7 +151,7 @@ def test_app_loads_with_framing_and_inputs():
     at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90).run()
     assert not at.exception, at.exception
     assert any("screening" in str(el.value).lower() for el in at.info)   # the A11 spine banner
-    assert len(at.number_input) == 4                                     # W/S/E/N bbox fields
+    assert len(at.number_input) == 5                                     # W/S/E/N bbox + mountain-front contour (B2)
     assert any(b.label == "Run screening" for b in at.button)            # the run button rendered
 
 
@@ -270,11 +270,26 @@ def test_run_screening_ranked_success_path(monkeypatch, tmp_path):
     cp = tmp_path / "ranking.csv"; cp.write_bytes(b"# spine\nbasin_id,rank\n0,1\n")
     monkeypatch.setattr(acquire, "build_fire_config",
                         lambda bbox, path, out_dir, **k: {"name": "t", "out_dir": out_dir, "dem": "x"})
-    monkeypatch.setattr(pl, "run_pipeline", lambda fire: ranked)
+    monkeypatch.setattr(pl, "run_pipeline", lambda fire, **k: ranked)   # **k absorbs the B2 contour_m kwarg
     monkeypatch.setattr(outs, "write_dnbr_outputs", lambda *a, **k: (cp, gj))
     screen = app.run_screening(SFK_BBOX, _FakeUpload())
     assert screen["kind"] == "ranked" and screen["n"] == 2
     assert screen["fc"]["type"] == "FeatureCollection" and screen["csv"].startswith(b"# spine")
+
+
+def test_run_screening_threads_operator_contour_to_pipeline(monkeypatch):
+    # Regression lock (B2): the per-fire mountain-front contour must reach run_pipeline
+    # (a bad merge once dropped the whole contour input; this pins the Upload-path threading).
+    import acquire
+    from src import pipeline as pl
+    calls = []
+    monkeypatch.setattr(acquire, "build_fire_config",
+                        lambda *a, **k: {"name": "t", "out_dir": ".", "dem": "x"})
+    monkeypatch.setattr(pl, "run_pipeline",
+                        lambda fire, **k: calls.append(k) or {"status": "refused",
+                        "reason_code": "R", "message": "m"})
+    app.run_screening(SFK_BBOX, _FakeUpload(), contour_m=1900.0)   # Cooks Peak
+    assert calls and calls[0].get("contour_m") == 1900.0
 
 
 def test_run_screening_refused_path(monkeypatch):
@@ -282,8 +297,8 @@ def test_run_screening_refused_path(monkeypatch):
     from src import pipeline as pl
     monkeypatch.setattr(acquire, "build_fire_config", lambda *a, **k: {"name": "t", "out_dir": ".", "dem": "x"})
     monkeypatch.setattr(pl, "run_pipeline",
-                        lambda fire: {"status": "refused", "reason_code": "REFUSED_INCISED_TERRAIN",
-                                      "message": "Refused: this fire's terrain is an incised valley."})
+                        lambda fire, **k: {"status": "refused", "reason_code": "REFUSED_INCISED_TERRAIN",
+                                           "message": "Refused: this fire's terrain is an incised valley."})
     screen = app.run_screening(SFK_BBOX, _FakeUpload())
     assert screen["kind"] == "refused" and "incised" in screen["message"].lower()
 

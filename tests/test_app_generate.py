@@ -154,6 +154,17 @@ def test_run_generated_screening_ranked(monkeypatch, tmp_path):
     assert calls["write"]                               # persisted via the reused writer
 
 
+def test_contour_m_threads_through_generate_path_to_pipeline(monkeypatch, tmp_path):
+    # Regression lock (B2): the operator's per-fire mountain-front contour must reach
+    # run_pipeline in the Generate path too, not just Upload. A bad merge once dropped
+    # the contour input entirely; this pins the threading so it can't silently vanish.
+    ranked = {"status": "ranked", "arms": {"arm_a": {"basins": [1]}, "arm_b": {}},
+              "creek_nearest": None, "headline_arm": "arm_a"}
+    calls = _wire_downstream(monkeypatch, tmp_path, ranked)
+    app.run_generated_screening(BBOX, _package()["pair"], contour_m=1900.0)  # Cooks Peak
+    assert calls["run"][0][1].get("contour_m") == 1900.0
+
+
 def test_run_generated_screening_refusal_unsoftened(monkeypatch, tmp_path):
     refused = {"status": "refused", "message": "no mountain front", "reason_code": "terrain"}
     calls = _wire_downstream(monkeypatch, tmp_path, refused)
@@ -199,7 +210,7 @@ def test_apptest_upload_default_and_generate_panel():
     at.run()
     assert not at.exception, at.exception
     assert any(b.label == "Run screening" for b in at.button)   # Upload default intact
-    assert len(at.number_input) == 4                            # W/S/E/N only
+    assert len(at.number_input) == 5                            # W/S/E/N bbox + mountain-front contour (B2)
 
     radio = next(r for r in at.radio if "Burn severity" in (r.label or ""))
     radio.set_value("Generate from dates")

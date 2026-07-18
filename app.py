@@ -297,14 +297,16 @@ def scorecard_view(package) -> dict:
     }
 
 
-def run_generated_screening(bbox_raw, pair, *, name="frontend"):
+def run_generated_screening(bbox_raw, pair, *, name="frontend", contour_m=150.0):
     """Approved pair -> dNBR (creator) -> the SAME validated downstream as an upload
     (build_fire_config -> run_pipeline -> write_dnbr_outputs) -> the screen dict.
 
     Identical failure contract to run_screening (F5): every failure reduces to a legible
     {"kind": "error"}. Extra keys on success: quicklook (PNG bytes) + dnbr_provenance
     (the creator's audit record) so the UI can show what was built. No science here --
-    the creator + pipeline own their own gates (AA-2/AA-3)."""
+    the creator + pipeline own their own gates (AA-2/AA-3). contour_m mirrors run_screening:
+    the per-fire mountain-front elevation (B2) is threaded into run_pipeline so the Generate
+    path honors the operator's contour too, not just the Upload path."""
     out_dir = None
     try:
         import dnbr_create
@@ -315,7 +317,7 @@ def run_generated_screening(bbox_raw, pair, *, name="frontend"):
         out_dir = Path(tempfile.mkdtemp(prefix="wws_autoacq_"))
         created = dnbr_create.create_dnbr(pair, bbox, out_dir / "dnbr", name=name)
         fire = build_fire_config(bbox, created["dnbr_tif"], out_dir, name=name)
-        result = run_pipeline(fire)
+        result = run_pipeline(fire, contour_m=contour_m)
         view = result_to_view(result)
         if view["kind"] == "ranked":
             csv_path, gj_path = write_dnbr_outputs(
@@ -387,7 +389,7 @@ def _draw_map():
     return m
 
 
-def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box):
+def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, contour_m=150.0):
     """The AA-4 approval surface: scorecard + previews + approve / burn-map / swap
     actions, or the honest non-pair states (Mode B waiting / window-closed / no-pre).
     Machine proposes, human disposes -- nothing is built without the Approve click.
@@ -512,7 +514,7 @@ def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box):
 
     if approve:
         with st.spinner("Building the dNBR, fetching DEM + buildings, scoring both arms..."):
-            screen = run_generated_screening(bbox_raw, package["pair"])
+            screen = run_generated_screening(bbox_raw, package["pair"], contour_m=contour_m)
             screen["inputs"] = inputs_key
             screen_box.clear(); screen_box.update(screen)   # same F1 store pattern as upload
 
@@ -540,6 +542,14 @@ def main():
         south = st.number_input("South (lat)", value=float(drawn[1]), format=f"%.{_BBOX_DP}f")
         east = st.number_input("East (lon)", value=float(drawn[2]), format=f"%.{_BBOX_DP}f")
         north = st.number_input("North (lat)", value=float(drawn[3]), format=f"%.{_BBOX_DP}f")
+        # B2: per-fire mountain-front contour (m) -- the elevation where canyons discharge onto the
+        # depositional plain. Guard-checked against THIS fire's DEM range (not a frozen scalar; an
+        # operator input defaulted to the Montecito value). Inland high-elevation fires need ~1900.
+        # Shared across BOTH modes (a terrain parameter, not upload-specific), so it sits above the
+        # toggle and applies to the Upload run and the Generate approval alike.
+        contour_m = st.number_input("Mountain-front contour (m)", value=150.0, step=10.0,
+                                    help="Range-front break elevation for THIS fire "
+                                         "(Montecito ~150; Cooks Peak ~1900; Deer Canyon ~1910).")
         # AA-4: the [Upload | Generate] toggle (spec section 10) -- one panel at a time;
         # Upload stays the DEFAULT during the build + demos (the proven path). Rendered as
         # a horizontal radio (same one-panel affordance, AppTest-drivable).
@@ -615,7 +625,8 @@ def main():
     # AA-4: the Generate panel (scorecard / Mode B waiting / honest hard-fails) renders
     # full-width below the form; an approval inside it stores into `box` like an upload run.
     if mode_label == "Generate from dates" and gen_box:
-        _render_generate_panel(gen_box, (west, south, east, north), inputs_key, box)
+        _render_generate_panel(gen_box, (west, south, east, north), inputs_key, box,
+                               contour_m=contour_m)
 
     screen = box
     if not screen:                                    # empty container -> nothing screened yet
