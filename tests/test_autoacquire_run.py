@@ -25,9 +25,9 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import autoacquire_run as ar  # noqa: E402
-import scene_select as ss  # noqa: E402
-import dnbr_create as dc  # noqa: E402
+from autoacquire import autoacquire_run as ar  # noqa: E402
+from autoacquire import scene_select as ss  # noqa: E402
+from autoacquire import dnbr_create as dc  # noqa: E402
 import acquire  # noqa: E402
 from src import pipeline as pl  # noqa: E402
 from src.grids import GateAbort  # noqa: E402

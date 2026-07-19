@@ -24,4 +24,5 @@ __pycache__/
 
 # Extra
 CLAUDE.md
+DECISIONS.md
 /.claude/commands

@@ -240,7 +240,7 @@ def generate_package(bbox_raw, ignition, containment, greenup_days=90):
     else backstopped with its type named. The package's honest non-pair states (waiting /
     window_closed / no_pre_scene) are NOT errors -- they pass through inside the package."""
     try:
-        import scene_select
+        from autoacquire import scene_select
         bbox = validate_bbox(*bbox_raw)
         package = scene_select.select(
             bbox, ignition=ignition, containment=containment, greenup_days=greenup_days)
@@ -309,7 +309,7 @@ def run_generated_screening(bbox_raw, pair, *, name="frontend", contour_m=150.0)
     path honors the operator's contour too, not just the Upload path."""
     out_dir = None
     try:
-        import dnbr_create
+        from autoacquire import dnbr_create
         from acquire import build_fire_config
         from src.pipeline import run_pipeline
         from src.outputs import write_dnbr_outputs
@@ -395,7 +395,7 @@ def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, contour
     Machine proposes, human disposes -- nothing is built without the Approve click.
     UI-side (imports streamlit); all decisions live in the pure helpers + scene_select."""
     import streamlit as st
-    import scene_select
+    from autoacquire import scene_select
 
     outcome = gen_box.get("outcome") or {}
     if outcome.get("kind") == "error":
@@ -495,7 +495,7 @@ def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, contour
         import tempfile as _tf
         tmp = Path(_tf.mkdtemp(prefix="wws_burnmap_"))
         try:
-            import dnbr_create
+            from autoacquire import dnbr_create
             with st.spinner("Computing the dNBR quicklook..."):
                 created = dnbr_create.create_dnbr(
                     package["pair"], validate_bbox(*bbox_raw), tmp, name="preview")

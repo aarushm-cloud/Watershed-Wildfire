@@ -24,8 +24,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import app  # noqa: E402
-import dnbr_create as dc  # noqa: E402
-import scene_select as ss  # noqa: E402
+from autoacquire import dnbr_create as dc  # noqa: E402
+from autoacquire import scene_select as ss  # noqa: E402
 from src.grids import GateAbort  # noqa: E402
 
 BBOX = (-122.145, 38.455, -121.985, 38.595)

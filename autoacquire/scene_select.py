@@ -5,8 +5,8 @@ satellite scene pair (plus ranked alternatives + audit trail) for the auto-acqui
 dNBR pathway. Pure structured optimization -- no LLM anywhere in this path (Feature
 Spec section 9). The pair is proposed; a HUMAN approves it before any dNBR is built.
 
-Repo-root peer of acquire.py (A35 pattern): this module is a NETWORK boundary;
-src/ stays a pure no-network seam. All network seams are module-level functions
+Lives in the autoacquire/ package, outside src/ (A35 pattern): this module is a
+NETWORK boundary; src/ stays a pure no-network seam. All network seams are module-level functions
 (_search_scenes, _candidate_valid_mask) so tests monkeypatch them (suite convention).
 
 Every threshold below is FROZEN by the ratified pre-registration (vault:
@@ -35,7 +35,7 @@ from pathlib import Path
 
 import numpy as np
 
-_REPO_ROOT = Path(__file__).resolve().parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 

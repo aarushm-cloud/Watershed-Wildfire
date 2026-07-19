@@ -3,8 +3,8 @@
 Turns a HUMAN-APPROVED scene pair (from scene_select) into a raw native-grid dNBR
 GeoTIFF + quicklook + provenance, satisfying the existing input gate
 acquire.assert_raw_dnbr and feeding the UNCHANGED validated ingest
-(build_fire_config -> ingest_dnbr_both_arms -> run_pipeline, A34). Repo-root peer
-of acquire.py / scene_select.py: a network boundary; src/ stays pure.
+(build_fire_config -> ingest_dnbr_both_arms -> run_pipeline, A34). Lives in the autoacquire/ package
+alongside scene_select.py, outside src/ (A35): a network boundary; src/ stays pure.
 
 Design frozen by the Feature Spec section 6B + the RATIFIED pre-registration
 (2026-07-17): ONE module = p2_acquire_dnbr's windowed-NATIVE-read fetch skeleton
@@ -45,12 +45,12 @@ from pathlib import Path
 
 import numpy as np
 
-_REPO_ROOT = Path(__file__).resolve().parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.grids import GateAbort  # noqa: E402
-from scene_select import (  # noqa: E402  (single source for the frozen mask sets)
+from autoacquire.scene_select import (  # noqa: E402  (single source for the frozen mask sets)
     S2_BAD_SCL,
     landsat_valid_mask,
     _sign_mpc,

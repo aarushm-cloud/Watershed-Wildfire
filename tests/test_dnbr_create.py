@@ -32,7 +32,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import acquire  # noqa: E402
-import dnbr_create as dc  # noqa: E402
+from autoacquire import dnbr_create as dc  # noqa: E402
 from src.grids import GateAbort  # noqa: E402
 
 # Small AOI (~2 km) in UTM 10N; rasters below cover it with margin.
