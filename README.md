@@ -53,7 +53,7 @@ Every artifact carries the burn-source provenance and an embedded *"what this is
 - Use it to **prioritize which catchments get a closer look** — a field recon, or a request for a USGS/state assessment — never as a hazard call over specific homes.
 - If you cite or forward a ranking, **carry the framing with it.**
 
-**A refusal is a valid result.** When a fire's terrain doesn't fit the method, the burn data is missing, or a catchment collapses (see [Design decisions](#design-decisions)), the tool **produces no ranking and says why** — emitting the raw input layers rather than a fabricated score. For this class of tool, an honest "cannot assess" is a correct outcome; a confident-looking wrong ranking is the failure mode the whole system is built to avoid.
+**Two terrain tiers, always inside the screening frame.** Range-front fires (a steep range spilling onto a flatter plain) get the validated canyon-mouth ranking described in [How it works](#how-it-works). Fires without that shape — incised, dissected highland — get a separate **exploratory, disclaimed** ranking instead of no ranking at all: unvalidated on this terrain class, and every artifact it produces says so plainly. **A loud failure is still a valid result** for what neither tier can handle — missing or incompatible burn data, a DEM that doesn't cover the fire's drainage network, or a catchment that collapses (see [Design decisions](#design-decisions)) — the tool **produces no ranking and says why** rather than emitting a fabricated score. An honest "cannot assess" is a correct outcome; a confident-looking wrong ranking is the failure mode the whole system is built to avoid.
 
 ---
 
@@ -103,6 +103,8 @@ Slope is the dimensionless gradient magnitude `tan θ` (rise/run, central differ
 
 **Output.** Writes `ranking.csv`, `basins.geojson`, and a static map, plus a `run_manifest.json` recording the config, the provenance stamp, and a timestamp. Every artifact carries the burn-source provenance and the embedded screening framing.
 
+**Two terrain tiers.** Everything above is the **range-front** path: canyon-mouth outlets, index-mode catchments, the frozen formula — the validated method. A fire without that range-front-over-plain shape (dissected, incised highland) routes instead to a separate, **exploratory and disclaimed** tier: WhiteboxTools delineates the whole drainage network into sub-basins split at channel confluences (no canyon-mouth outlet needed), the drains-to-asset filter is dropped (there is no depositional plain for a building to sit near), and basins are ordered by **intensity** (`mean_burn × mean_slope`) rather than the area-weighted score, because contributing area has no anchored meaning on a segmentation-threshold basin the way it does on a canyon-mouth catchment. The frozen `score` still rides along as a companion column, never dropped. Every incised artifact carries an explicit disclaimer — **unvalidated on this terrain class** — so it is never mistaken for the validated ranking. An incised fire that supplies SBS instead of dNBR fails loud rather than silently skipping that disclaimer (v1 scope: the SBS path has no both-arms shape to hang it on).
+
 **Burn inputs — both arms.** The pipeline scores from either burn source: **BAER SBS** where a fire has it, and **Sentinel-2 dNBR** — the production default — for the un-assessed fires that don't (see [Design decisions](#design-decisions)). The dNBR path runs two arms, a headline ranking and a companion cross-check.
 
 ### Parameters
@@ -143,7 +145,7 @@ The tool is a screening aid, and its rankings are meant to be read with these bo
 - **Rankings are relative and within-fire.** A ranking orders basins within a single fire; it is not a probability, a volume, or a comparison between fires. (See [What it is NOT](#what-it-is--and-is-not).)
 - **No rainfall or regional susceptibility.** The screen weighs burn severity, slope, and contributing area — but not storm intensity, nor the regional susceptibility that geology, soils, and sediment supply confer (the San Gabriels reliably produce debris flows; other ranges far less so). Both strongly influence whether a basin actually flows, so a ranking complements — never replaces — an assessment that accounts for them.
 - **Large basins can be over-weighted.** Contributing area enters the score linearly with no upper bound, so a large, moderately-burned catchment can rank above a small, severely-burned one. For context, the USGS M1 likelihood model is calibrated on basins of 0.2–8 km² (Staley et al., 2016, USGS OFR 2016-1106); this tool applies no such upper bound and so leans toward larger basins at the high end.
-- **Some terrain doesn't fit.** The method keys on canyons spilling from a steep range onto a flatter plain. Where that geometry is absent, it declines to rank rather than forcing an answer.
+- **Some terrain doesn't fit the validated method.** The frozen `burn × slope × area` ranking keys on canyons spilling from a steep range onto a flatter plain. Where that geometry is absent (incised, dissected highland), the tool no longer declines outright — it switches to a separate **exploratory, disclaimed** tier instead: WhiteboxTools whole-network sub-basins ordered by burn × slope intensity, unvalidated on this terrain class. See [Design decisions](#design-decisions).
 
 See [`docs/limitations.md`](docs/limitations.md) for the full technical treatment.
 
@@ -161,7 +163,7 @@ See [`docs/limitations.md`](docs/limitations.md) for the full technical treatmen
 
 **Why the burn source is decided once and read everywhere.** `burn_source` must appear in the ranking CSV, the GeoJSON, the map legend, the app, and the limitations doc. Five places asserting one fact will eventually drift. It is determined a single time at ingest, stamped onto one frozen provenance object, and only ever read downstream — one source of truth cannot disagree with itself.
 
-**Why fail loud, and why a refusal is a feature.** Real inputs from messy, un-assessed fires will violate the clean Montecito template — no clear mountain-front, zero detected outlets, missing burn coverage, odd DEM tiles, or imagery too cloudy to compute a dNBR at all. On such inputs the tool errors explicitly and refuses to rank, rather than degrading into a plausible-but-unfounded output. Concrete refusals already exercised: an incised-upland fire with no mountain-front (terrain doesn't fit), and an actively-burning fire whose only imagery was smoke-covered (no complete post-fire scar to measure). A confident-looking wrong ranking is the worst outcome this project can produce — worse than an error.
+**Why fail loud, and why a refusal is a feature.** Real inputs from messy, un-assessed fires will violate the clean Montecito template — zero detected outlets, missing burn coverage, odd DEM tiles, or imagery too cloudy to compute a dNBR at all. On such inputs the tool errors explicitly rather than degrading into a plausible-but-unfounded output. Terrain shape alone no longer triggers a refusal — an incised fire routes to the exploratory tier instead (see [How it works](#how-it-works)) — but that tier still fails loud where it genuinely can't proceed: an incised fire supplying SBS instead of dNBR (v1 scope — the SBS path has no both-arms shape to hang the mandatory disclaimer on), or a DEM that doesn't cover the fire's drainage network, leaving every candidate sub-basin a truncated fragment of the real one. Concrete cases already exercised: an actively-burning fire whose only imagery was smoke-covered (no complete post-fire scar to measure). A confident-looking wrong ranking is the worst outcome this project can produce — worse than a loud error.
 
 **Why there is no orchestration layer.** Stages connect through a shared data contract (`grids.py`) enforced by assertions, not through an adapter/coordinator object. More files do not equal more correctness; the original catchment bug (below) was killed by an unambiguous contract, not by indirection. Stage order is wired only in the thin `run.py` / `src/pipeline.py` seam.
 
@@ -195,8 +197,9 @@ Wildfire-Watershed/
 │   ├── hydrology.py           # pysheds: fill → flats → D8 → accumulation
 │   ├── delineate.py           # outlet detection + index-mode catchment delineation
 │   ├── score.py               # frozen burn×slope×area heuristic + within-fire rank
+│   ├── subbasins.py           # A39: WhiteboxTools whole-network sub-basins (incised terrain only)
 │   ├── outputs.py             # ranking.csv, basins.geojson, static map + framing
-│   └── pipeline.py            # run_pipeline: wires the stages + the terrain-applicability refusal
+│   └── pipeline.py            # run_pipeline: wires the stages + the two-tier terrain router (range-front / incised)
 │
 ├── data/                      # inputs on disk (gitignored if large)
 ├── out/                       # generated, namespaced PER FIRE (never flat)

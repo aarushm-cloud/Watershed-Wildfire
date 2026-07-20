@@ -1,7 +1,8 @@
 """pipeline.py -- the promoted per-fire screening pipeline (run_pipeline + its stage
-wiring + the A27/A31 terrain-applicability refusal), lifted VERBATIM out of
-validation/gate.py so the production driver (run.py) and the validation harness
-(validation/gate.py) share ONE pipeline definition instead of gate.py owning it.
+wiring + the A39 terrain router, formerly the A27/A31 terrain-applicability refusal),
+lifted VERBATIM out of validation/gate.py so the production driver (run.py) and the
+validation harness (validation/gate.py) share ONE pipeline definition instead of
+gate.py owning it.
 
 This is a behavior-neutral promotion (import churn only): every function body, the
 frozen order of operations, and every constant are byte-for-byte what gate.py held.
@@ -21,7 +22,7 @@ Sub-stages (single pipeline, stages already extracted into src/ modules):
   2e score+rank -- mean_burn x mean_slope x area_km2; within-fire ordinal (src/score.py)
   2f truth+metrics -- creek->outlet match (<=250 m); tercile; rank-AUC; means (here)
 
-All distances are metric. Fail loud, never degrade (FM-10). See DECISIONS A16/A27/A31.
+All distances are metric. Fail loud, never degrade (FM-10). See DECISIONS A16/A27/A31/A39.
 """
 
 from __future__ import annotations
@@ -103,8 +104,11 @@ SOUTHFORK_FIRE = {
     "name": "southfork",
     "dem": _SOUTHFORK_DATA / "dem" / "dem.tif",
     "sbs": None,                                    # dNBR-only fire; no SBS by design (A31, A29)
-    "assets": _SOUTHFORK_DATA / "assets" / "osm_buildings_32613.gpkg",
-    "creeks": None,                                 # no tool-format creek layer; refuses before creeks load
+    # A39: incised terrain now ROUTES to the WBT sub-basin dNBR both-arms path instead of refusing, so
+    # South Fork needs its native dNBR burn input (the P3.2 acquisition, grid-matched to the DEM).
+    "dnbr": _SOUTHFORK_DATA / "burn" / "southfork_dnbr" / "dnbr_native.tif",
+    "assets": _SOUTHFORK_DATA / "assets" / "osm_buildings_32613.gpkg",   # loaded only on the range-front path; incised skips it
+    "creeks": None,                                 # no tool-format truth-creek layer for South Fork
     "out_dir": OUT / "southfork",
     "expected_crs": "EPSG:32613",
     "validation_case": "South_Fork_Fire_2024",
@@ -353,41 +357,18 @@ def evaluate(basins, ranked, creek_nearest, match_m):
 
 
 # ---------------------------------------------------------------------------
-# A27 terrain-applicability gate (wired) + caller-side dispatch -- DECISIONS A27/A27.1, P3.4-build-2.
+# A39 terrain router (supersedes the A27 refusal gate) -- DECISIONS A27/A27.1/A39.
+# write_refusal/build_refusal_message stay imported though this module no longer calls them itself:
+# they remain outputs.py's public refusal-writing contract (Task 11 / other callers may still reach
+# it), so the import is left intact rather than pruned as part of this route-not-refuse change.
 # ---------------------------------------------------------------------------
-def _terrain_applicability_gate(dem_raw, dem_nodata, out_dir):
-    """A27 terrain-applicability pre-check, WIRED into the live pipeline (DECISIONS A27/A27.1).
+def _terrain_mode(dem_raw, dem_nodata):
+    """A39 -- classify terrain to ROUTE, not to refuse. Supersedes the A27 gate.
 
-    Runs the frozen hypsometric-span detector on the RAW (pre-pit-fill) DEM. If the terrain is
-    ill-posed for CONTOUR_M outlet-anchoring (incised: valid-cell (p10 - p1) > 50 m), it writes an
-    honest refusal.json to out_dir and returns the FIREWALL-CLEAN refusal-result; otherwise it
-    returns None and the pipeline proceeds to the A25 guard unchanged. Montecito (span ~15 m) ->
-    None -> falls through, so the behavior lock is untouched.
-
-    FIREWALL (A27): the returned dict carries EXACTLY
-    {status, reason_code, span_m, span_threshold_m, message} -- span_m is a DIFFERENCE (a vertical
-    extent) and span_threshold_m the frozen 50 m; NO absolute elevation / p1 / p10 / CONTOUR_M
-    candidate crosses this boundary. write_refusal may LOG more on disk (refusal.json is a terminal
-    artifact crossing no stage boundary); this return must never widen toward that field set. The
-    detector's all-nodata GateAbort is deliberately NOT caught here -- a broken/empty DEM is a
-    fail-loud input error (A8), not an honest 'wrong terrain' refusal.
-
-    dem_raw    -- raw metric DEM (m), pre-pit-fill; the SAME array the A25 guard reads.
-    dem_nodata -- DEM nodata sentinel (FM-12: pysheds defaults an undeclared nodata to 0).
-    out_dir    -- per-fire output dir (refusal.json sink); same convention as write_outputs.
+    The detector itself is unchanged; only our response to it is.
     """
     verdict = assess_hypsometric_applicability(dem_raw, dem_nodata)
-    if not verdict["refuse"]:
-        return None
-    write_refusal(verdict, out_dir)        # writes refusal.json only; NO ranking.csv / basins.geojson
-    return {
-        "status": "refused",
-        "reason_code": verdict["reason_code"],
-        "span_m": verdict["span_m"],                 # a difference (vertical extent, m), never an absolute elevation
-        "span_threshold_m": verdict["span_threshold_m"],
-        "message": build_refusal_message(verdict["reason_code"], verdict["span_m"],
-                                         verdict["span_threshold_m"]),
-    }
+    return ("incised" if verdict["refuse"] else "range_front"), verdict
 
 
 def dispatch_result(result):
@@ -491,38 +472,81 @@ def run_pipeline(fire=None, contour_m=None):
     # the no-arg / default call stays byte-identical; app.py passes the operator's per-fire value.
     contour_m = contour_m if contour_m is not None else CONTOUR_M
 
-    # A31: load the DEM ONCE, up front -- before the terrain gate and before hydrology. Lifting the DEM
-    # read out of stage_2a lets the A27 terrain-applicability gate refuse on the raw DEM ALONE, before
-    # any SBS is opened, any hydrology runs, or the master-outlet ABORT is evaluated (DECISIONS A31).
+    # A31: load the DEM ONCE, up front -- before the terrain router and before hydrology. Lifting the
+    # DEM read out of stage_2a lets the terrain classification run on the raw DEM ALONE, before any SBS
+    # is opened, any hydrology runs, or the master-outlet ABORT is evaluated (DECISIONS A31).
     dem_artifacts = _load_dem_artifacts(fire)
 
-    # A27/A31 terrain-applicability refusal (DECISIONS A27 / A27.1 / A31) -- now FIRST, on the raw DEM.
-    # Incised terrain has no mountain-front break, so the CONTOUR_M anchor is ill-posed; emit an honest
-    # refusal.json to fire["out_dir"] and return the refusal-result WITHOUT opening SBS, running
-    # hydrology, or evaluating the master-outlet ABORT. Montecito (range-front, span ~15 m) -> None ->
-    # proceeds. This subsumes the prior "master-outlet-ABORT-before-A27" order (A31): no hydrology work
-    # is done for a fire that will refuse on terrain.
-    refusal = _terrain_applicability_gate(dem_artifacts["dem_raw"], dem_artifacts["dem_nodata"],
-                                          fire["out_dir"])
-    if refusal is not None:
-        return refusal     # polymorphic refusal-result; SBS never opened, no hydrology run (caller dispatches on status)
+    # A39 terrain ROUTER (supersedes the A27/A31 refusal) -- still FIRST, on the raw DEM. Incised terrain
+    # no longer refuses: it routes to the WhiteboxTools sub-basin path (phase 1 below). Range-front
+    # (Montecito, span ~15 m) routes to the untouched pysheds canyon-mouth path -- byte-identical.
+    terrain_mode, terrain_verdict = _terrain_mode(dem_artifacts["dem_raw"], dem_artifacts["dem_nodata"])
+    incised = (terrain_mode == "incised")
+    if incised and fire.get("sbs") is not None:
+        # A39 v1 scope: the SBS single-arm path has no both-arms shape to hang the disclaimer/UI off
+        # of, so incised+SBS would silently emit an undisclaimed ranking. Fail loud instead.
+        raise GateAbort(
+            "FAIL: incised terrain with an SBS burn input is not supported in v1 (A39). "
+            "The SBS path does not carry the both-arms shape the disclaimer and UI require, "
+            "so it would emit an UNDISCLAIMED ranking. Supply a dNBR input, or run the "
+            "range-front path on terrain that fits it.")
+    if incised and fire.get("creeks") is not None:
+        # Latent renumbering trap: compute_creek_nearest (2f, below) would run on phase-1 basin
+        # numbering (build_geometry_records), but filter_burned_steep (phase 2, incised-only)
+        # renumbers surviving basins from 0 AFTER creek distances are computed against that
+        # phase-1 numbering -- so creek_nearest's basin_id would silently point at the WRONG
+        # post-filter basin (flowed/matched_creek mis-attribution). Unreachable today (every
+        # incised fire sets creeks=None); fail loud rather than let it wire up silently.
+        raise GateAbort(
+            f"FAIL: creek/truth matching is not supported on the incised tier in v1 (A39) for "
+            f"fire {fire.get('name')!r}. Phase-2 filtering (filter_burned_steep) renumbers "
+            "surviving sub-basins from 0 AFTER creek distances are computed against the phase-1 "
+            "numbering, so a creek match would silently attach to the WRONG basin. Do NOT wire a "
+            "creeks layer through the incised path -- set fire['creeks'] = None, or run the "
+            "range-front path on terrain that fits it.")
 
-    # Hydrology + master outlet run ONLY for terrain that passed the gate. stage_2a opens+aligns SBS and
-    # reuses the DEM artifacts loaded above -- the pipeline opens the DEM exactly once (A31).
+    # Hydrology + the master-outlet scale-free guard run for BOTH terrain modes, unconditionally (A39:
+    # incised terrain still needs the pysheds fdir/acc chain for slope's neighbourhood -- consumed via
+    # hydro["dem_raw"] below -- and the guard is a DEM sanity check, not a range-front-only concern).
+    # stage_2a opens+aligns SBS (never for an incised fire -- guarded above) and reuses the DEM artifacts
+    # loaded above, so the pipeline opens the DEM exactly once (A31).
     hydro = stage_2a_hydrology(fire, dem_artifacts)
     assert_master_outlet_scale(hydro["master_km2"], hydro["valid_area_km2"])   # FM-1 scale-free guard; raises on collapse
 
-    # A25 carve-out: fail loud if CONTOUR_M is grossly mis-set for this DEM BEFORE detecting outlets
-    # (else a wrong-fire contour silently yields zero/wrong canyon mouths). Montecito 150 m is inside
-    # [~0, 1199] m -> passes; runs on the same dem_raw the contour test uses. src/delineate.py
-    assert_contour_in_dem_range(hydro["dem_raw"], hydro["dem_nodata"], contour_m=contour_m)
-    # unpack hydro at the call site (dict-key coupling stays here, not in delineate); src/delineate.py
-    outlets = stage_2b_outlets(hydro["acc"], hydro["fdir"], hydro["dem_raw"], hydro["shape"], contour_m=contour_m)
-    assets = load_assets(fire["assets"])     # GeoDataFrame; src/ingest.py
-    _assert_metric_crs(assets.crs, "assets.geojson")
-    asset_xy = np.column_stack([assets.geometry.x.values, assets.geometry.y.values])
-    basins = stage_2c_delineate(hydro["grid"], hydro["acc"], hydro["fdir_raster"],
-                                hydro["transform"], hydro["shape"], outlets, asset_xy)
+    if incised:
+        # No mountain front exists, so the CONTOUR_M guard and canyon-mouth outlet stage are both
+        # ill-posed here; assets are not loaded (A39: no drains-to-asset filter on incised terrain --
+        # there is no depositional plain for assets to sit on).
+        from src.subbasins import segment_subbasins, build_geometry_records
+        labels, subbasin_meta = segment_subbasins(fire["dem"], str(Path(fire["out_dir"]) / "_wbt"))
+        if labels.shape != hydro["dem_raw"].shape:
+            # assert_aligned (src/grids.py) takes rasterio PROFILES, not bare shapes -- an explicit
+            # comparison here does the same job: a mis-aligned label grid would silently index the
+            # wrong cells and still write a clean-looking CSV, so this must raise, never skip.
+            raise GateAbort(
+                f"FAIL: subbasin labels shape {labels.shape} != pipeline DEM grid "
+                f"{hydro['dem_raw'].shape} (A39, subbasin labels vs pipeline DEM grid).")
+        basins = build_geometry_records(labels, hydro["dem_raw"], hydro["dem_nodata"],
+                                        subbasin_meta.pop("_acc"))
+        if not basins:
+            raise GateAbort(
+                "FAIL: no sub-basins survive geometry filtering on incised terrain (A39). "
+                "Most likely the DEM does not cover the drainage network, or every basin is "
+                "truncated at the data footprint. Do NOT emit an empty ranking.")
+        outlets = [b["outlet"] for b in basins]
+    else:
+        subbasin_meta = None
+        # A25 carve-out: fail loud if CONTOUR_M is grossly mis-set for this DEM BEFORE detecting outlets
+        # (else a wrong-fire contour silently yields zero/wrong canyon mouths). Montecito 150 m is inside
+        # [~0, 1199] m -> passes; runs on the same dem_raw the contour test uses. src/delineate.py
+        assert_contour_in_dem_range(hydro["dem_raw"], hydro["dem_nodata"], contour_m=contour_m)
+        # unpack hydro at the call site (dict-key coupling stays here, not in delineate); src/delineate.py
+        outlets = stage_2b_outlets(hydro["acc"], hydro["fdir"], hydro["dem_raw"], hydro["shape"], contour_m=contour_m)
+        assets = load_assets(fire["assets"])     # GeoDataFrame; src/ingest.py
+        _assert_metric_crs(assets.crs, "assets.geojson")
+        asset_xy = np.column_stack([assets.geometry.x.values, assets.geometry.y.values])
+        basins = stage_2c_delineate(hydro["grid"], hydro["acc"], hydro["fdir_raster"],
+                                    hydro["transform"], hydro["shape"], outlets, asset_xy)
 
     slope = mean_slope_tan(hydro["dem_raw"], hydro["dem_nodata"])   # tan(theta) raster (2d); A33 drops the nodata ring
 
@@ -558,6 +582,18 @@ def run_pipeline(fire=None, contour_m=None):
         raise GateAbort("run_pipeline: fire provides neither 'sbs' nor 'dnbr' -- no burn input (A8 fail-loud).")
     D = ingest_dnbr_both_arms(dnbr_path, dem_artifacts["profile"])    # both arms, reprojected+aligned to the DEM grid
 
+    if incised:
+        # Phase 2 (A39): burn weights and slope don't exist until after the dNBR ingest above, so the
+        # phase-1 geometry basins are filtered here for burn + steepness. Arm A's weight raster defines
+        # the set (A39 clause 6); Arm B below scores that identical set, never a re-filtered one.
+        from src.subbasins import filter_burned_steep
+        basins = filter_burned_steep(basins, D["arm_a"]["wt"], slope)
+        if not basins:
+            raise GateAbort(
+                "FAIL: no sub-basins are both sufficiently burned and steep on incised "
+                "terrain (A39). The burn may not intersect mapped drainage. Do NOT emit an "
+                "empty ranking.")
+
     # dNBR NoData/cloud guard (A8; P2.1 §4 path 1). HARD abort on the guarded set: flowed (truth) basins
     # when creeks exist (P2.3-harness parity, byte-identical), else ALL scored basins (a real frontend fire
     # has creeks=None -> every basin guarded). The flowed set is score-independent (creek match <= TRUTH_MATCH_M).
@@ -585,12 +621,26 @@ def run_pipeline(fire=None, contour_m=None):
     arm_b = _score_one_arm(basins, D["arm_b"]["wt"], D["arm_b"]["covered"], slope, creek_nearest, D["covered_interp"])
     provenance = {"burn_source": "dNBR"}   # A4: single burn-source stamp
 
-    return {"status": "ranked",
-            "hydro": hydro, "outlets": outlets,
-            "provenance": provenance, "creeks": creeks, "creek_nearest": creek_nearest,
-            "arms": {"arm_a": arm_a, "arm_b": arm_b}, "headline_arm": "arm_a",
-            "dnbr_diag": {"valid": D["valid"], "nodata_mask": D["nodata_mask"],
-                          "covered_interp": D["covered_interp"], "nodata_warn_basins": nodata_warn},
-            # Arm A (headline) mirrored at top level so uniform consumers (run.py, viewers) work unchanged:
-            "basins": arm_a["basins"], "ranked": arm_a["ranked"],
-            "n_ties": arm_a["n_ties"], "metrics": arm_a["metrics"]}
+    if incised:
+        # A39: area has no anchored meaning on segmentation-threshold basins (unlike a canyon-mouth
+        # catchment), so add the area-independent intensity ordering on top of the frozen score/rank.
+        # Both arms are independent copies (_score_one_arm) and must both be ranked.
+        from src.score import add_intensity_rank
+        add_intensity_rank(arm_a["basins"])
+        add_intensity_rank(arm_b["basins"])
+
+    result = {"status": "ranked",
+              "hydro": hydro, "outlets": outlets,
+              "provenance": provenance, "creeks": creeks, "creek_nearest": creek_nearest,
+              "arms": {"arm_a": arm_a, "arm_b": arm_b}, "headline_arm": "arm_a",
+              "dnbr_diag": {"valid": D["valid"], "nodata_mask": D["nodata_mask"],
+                            "covered_interp": D["covered_interp"], "nodata_warn_basins": nodata_warn},
+              # Arm A (headline) mirrored at top level so uniform consumers (run.py, viewers) work unchanged:
+              "basins": arm_a["basins"], "ranked": arm_a["ranked"],
+              "n_ties": arm_a["n_ties"], "metrics": arm_a["metrics"]}
+    result["terrain_mode"] = terrain_mode
+    result["terrain_span_m"] = terrain_verdict["span_m"]
+    if incised:
+        result["basin_engine"] = subbasin_meta["engine"]
+        result["subbasin_meta"] = subbasin_meta
+    return result

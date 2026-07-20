@@ -51,3 +51,11 @@ dependencies:
   # --- test ---
   - pytest==9.0.3
   - hypothesis==6.156.3    # property-based tests for the frozen scoring invariants (CF-12)
+  # --- sub-basin delineation on incised terrain (A39) ---
+  - pip                    # explicit dep so conda can process the pip: block below (unpinned -- exact version is in environment.lock.yml)
+  - pip:
+    # A39: WBT binary is provisioned at install time (see the A39 entry in DECISIONS.md), so src/ stays
+    # network-free at runtime per the A35 seam.
+    # NOTE: the pip wrapper is versioned separately from the WhiteboxTools engine binary; 2.3.6
+    # provisions engine v2.4.0 (the version the A39 sandbox validated against).
+    - whitebox==2.3.6

@@ -184,6 +184,7 @@ dependencies:
   - pandas=3.0.3=py311h8948835_0
   - pcre2=10.47=h30297fc_0
   - pillow=12.2.0=py311hd37aea2_0
+  - pip=26.1.2=pyh8b19718_0
   - platformdirs=4.10.0=pyhcf101f3_0
   - pluggy=1.6.0=pyhf9edf01_1
   - proj=9.7.1=hfb14a63_3
@@ -249,6 +250,7 @@ dependencies:
   - uvicorn=0.51.0=pyhc90fa1f_0
   - watchdog=6.0.0=py311he363849_3
   - websockets=16.0=py311he363849_1
+  - wheel=0.47.0=pyhd8ed1ab_0
   - xerces-c=3.3.0=h25f632f_1
   - xorg-libxau=1.0.12=hc919400_1
   - xorg-libxdmcp=1.1.5=hc919400_1
@@ -259,3 +261,5 @@ dependencies:
   - zlib=1.3.2=h8088a28_2
   - zlib-ng=2.3.3=hed4e4f5_1
   - zstd=1.5.7=hbf9d68e_6
+  - pip:
+      - whitebox==2.3.6

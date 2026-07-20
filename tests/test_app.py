@@ -292,15 +292,20 @@ def test_run_screening_threads_operator_contour_to_pipeline(monkeypatch):
     assert calls and calls[0].get("contour_m") == 1900.0
 
 
-def test_run_screening_refused_path(monkeypatch):
+def test_run_screening_incised_sbs_abort_is_not_softened(monkeypatch, incised_fire):
+    """A39: incised terrain no longer refuses (the old REFUSED_INCISED_TERRAIN fake this test drove
+    can no longer happen), so this locks the invariant against the real, reachable failure instead --
+    incised+SBS is a hard GateAbort (Task 8). run_screening must still reduce it to a legible error,
+    never a ranking."""
     import acquire
-    from src import pipeline as pl
-    monkeypatch.setattr(acquire, "build_fire_config", lambda *a, **k: {"name": "t", "out_dir": ".", "dem": "x"})
-    monkeypatch.setattr(pl, "run_pipeline",
-                        lambda fire, **k: {"status": "refused", "reason_code": "REFUSED_INCISED_TERRAIN",
-                                           "message": "Refused: this fire's terrain is an incised valley."})
+    fire = dict(incised_fire)
+    fire["sbs"] = "data/southfork/burn/arm_a_cls.tif"   # any real path -- never opened before the abort
+    fire["dnbr"] = None
+    monkeypatch.setattr(acquire, "build_fire_config", lambda *a, **k: fire)
     screen = app.run_screening(SFK_BBOX, _FakeUpload())
-    assert screen["kind"] == "refused" and "incised" in screen["message"].lower()
+    assert screen["kind"] == "error"
+    assert "incised" in screen["message"].lower()
+    assert "fc" not in screen and "csv" not in screen      # no ranking artifact shipped
 
 
 def test_run_screening_logs_traceback_to_stderr_on_backstop(monkeypatch, capsys):
@@ -428,3 +433,24 @@ def test_ranked_results_persist_across_reruns():
     at.run()                                     # ANOTHER rerun (as st_folium/download would cause)
     assert not at.exception, at.exception
     assert len(at.dataframe) >= 1                 # ...and it did NOT disappear
+
+
+# ---- A39: result_to_view flags incised-terrain ranked results -----------------------------------
+
+def test_result_to_view_incised_is_ranked_and_flagged():
+    from app import result_to_view
+    result = {"status": "ranked", "terrain_mode": "incised",
+              "arms": {"arm_a": {"ranked": [], "basins": []},
+                       "arm_b": {"ranked": [], "basins": []}},
+              "headline_arm": "arm_a"}
+    view = result_to_view(result)
+    assert view["kind"] == "ranked" and view["incised"] is True
+
+
+def test_result_to_view_range_front_not_flagged():
+    from app import result_to_view
+    result = {"status": "ranked", "terrain_mode": "range_front",
+              "arms": {"arm_a": {"ranked": [], "basins": []},
+                       "arm_b": {"ranked": [], "basins": []}},
+              "headline_arm": "arm_a"}
+    assert result_to_view(result)["incised"] is False

@@ -95,17 +95,22 @@ def test_approved_happy_path_wires_created_dnbr_into_pipeline(monkeypatch, tmp_p
     assert out["outputs"] == ("r.csv", "b.geojson")
 
 
-def test_refused_pipeline_writes_no_ranked_outputs(monkeypatch, tmp_path):
+def test_incised_sbs_abort_writes_no_ranked_outputs(monkeypatch, tmp_path, incised_fire):
+    """A39: incised terrain no longer refuses (the old REFUSED-status fake this test drove can no
+    longer happen), so this locks the B1/A28 no-artifacts invariant against the real, reachable
+    failure instead -- incised+SBS is a hard GateAbort (Task 8)."""
+    fire = dict(incised_fire)
+    fire["sbs"] = "data/southfork/burn/arm_a_cls.tif"   # any real path -- never opened before the abort
+    fire["dnbr"] = None
     monkeypatch.setattr(ss, "select", _Spy(ret=_package()))
     monkeypatch.setattr(dc, "create_dnbr", _Spy(ret={"dnbr_tif": "d", "quicklook_png": "q",
                                                      "provenance_json": "p", "gate_stats": {}}))
-    monkeypatch.setattr(acquire, "build_fire_config", _Spy(ret={"name": "x"}))
-    monkeypatch.setattr(pl, "run_pipeline", _Spy(ret={"status": "refused", "reason_code": "t"}))
+    monkeypatch.setattr(acquire, "build_fire_config", _Spy(ret=fire))
     write = _Spy()
     monkeypatch.setattr(ar.outputs, "write_dnbr_outputs", write)
-    out = ar.run_autoacquire(BBOX, out_dir=tmp_path, approve=True, **DATES)
-    assert write.calls == []                   # no ranking artifacts on a refusal (B1/A28)
-    assert "outputs" not in out
+    with pytest.raises(GateAbort):
+        ar.run_autoacquire(BBOX, out_dir=tmp_path, approve=True, **DATES)
+    assert write.calls == []                   # no ranking artifacts on the abort (B1/A28)
 
 
 @pytest.mark.parametrize("status", ["waiting", "window_closed", "no_pre_scene"])
@@ -128,13 +133,17 @@ def test_creator_gateabort_propagates(monkeypatch, tmp_path):
         ar.run_autoacquire(BBOX, out_dir=tmp_path, approve=True, **DATES)
 
 
-def test_pipeline_refusal_passed_through_unsoftened(monkeypatch, tmp_path):
+def test_incised_sbs_abort_propagates_unsoftened(monkeypatch, tmp_path, incised_fire):
+    """A39: run_autoacquire does not catch/rewrap the pipeline's GateAbort -- it propagates raw with
+    its real message intact, exactly like the creator's (test_creator_gateabort_propagates).
+    Retargeted from the old REFUSED-status dict-passthrough test: the failure is now an exception,
+    not a returned dict, so there is no return value left to soften."""
+    fire = dict(incised_fire)
+    fire["sbs"] = "data/southfork/burn/arm_a_cls.tif"   # any real path -- never opened before the abort
+    fire["dnbr"] = None
     monkeypatch.setattr(ss, "select", _Spy(ret=_package()))
     monkeypatch.setattr(dc, "create_dnbr", _Spy(ret={"dnbr_tif": "d", "quicklook_png": "q",
                                                      "provenance_json": "p", "gate_stats": {}}))
-    monkeypatch.setattr(acquire, "build_fire_config", _Spy(ret={"name": "x"}))
-    refusal = {"status": "refused", "reason_code": "terrain", "message": "no mountain front"}
-    monkeypatch.setattr(pl, "run_pipeline", _Spy(ret=refusal))
-    out = ar.run_autoacquire(BBOX, out_dir=tmp_path, approve=True, **DATES)
-    assert out["status"] == "ran"
-    assert out["pipeline"] == refusal          # verbatim, never softened (FM-10)
+    monkeypatch.setattr(acquire, "build_fire_config", _Spy(ret=fire))
+    with pytest.raises(GateAbort, match="incised"):
+        ar.run_autoacquire(BBOX, out_dir=tmp_path, approve=True, **DATES)

@@ -1,12 +1,14 @@
 # Post-Fire Debris-Flow Watershed Screening Tool: Algorithms Reference
 
 **Author:** Aarush Madhireddy
-**Date:** July 6, 2026 · **reconciled to the live tree 2026-07-11**
+**Date:** July 6, 2026 · reconciled to the live tree 2026-07-11 · **reconciled again 2026-07-20 (A39, §9)**
 **Scope:** A walkthrough of every algorithm in the scoring pipeline, from burn/DEM ingest through the frozen `mean_burn × mean_slope × contributing_area_km²` heuristic to the within-fire ranking and the validation metrics. Each algorithm gets one plain-language explanation ("For the Environmental Scientist") and one implementation-level explanation ("For the Programmer").
 
 > **The spine, stated once, up top.** Every score in this pipeline is a **within-fire ordinal ranking** of "which burned watersheds warrant a closer look first." It is **never** a prediction of where debris will go, never a probability, never a volume, and never cross-fire comparable. The tool triages fires that fall outside formal USGS/state assessment; it does not out-model USGS. This framing is stamped into every artifact ([outputs.py:35](../src/outputs.py#L35)) and it governs how you read everything below.
 
 This document reflects the **live code tree**. **Reconciled 2026-07-11:** since the 2026-07-06 draft, three sections advanced in the tree and are updated below — the dNBR arm is now **wired** into production (A34, §6–§7), the coastal-slope nodata-ring drop **shipped** (A33 + the F4 slope-coverage flag, §4), and the pysheds flow model gained an independent **pyflwdir cross-check** (CF-11, §3). Where the code and an existing `.md` disagree on a number, the code wins and the discrepancy is flagged inline. The project's canonical science notes live in the Obsidian vault; the repo's `ARCHITECTURE.md` and `docs/science_reference.md` are one-line stubs, so this doc cites source lines, not those stubs.
+
+**Reconciled again 2026-07-20 (A39):** §9 advanced from a terrain **refusal** to a terrain **router** — incised-upland fires no longer stop at `refusal.json`; they route to a disclaimed, exploratory WhiteboxTools sub-basin ranking instead (decision **A39**, supersedes A27/A28's refuse-behavior clause; the A27 detector itself is unchanged). §11's parameter table gained the four frozen `SUBBASIN_*` constants. Range-front fires (Montecito) are byte-identical; the behavior lock is untouched. Full test suite: 261 passed / 0 failed at reconciliation time.
 
 ---
 
@@ -20,7 +22,7 @@ This document reflects the **live code tree**. **Reconciled 2026-07-11:** since 
 6. [Burn severity to weight, and the coverage-weighted mean (deep)](#6-burn-severity-to-weight-and-the-coverage-weighted-mean-deep)
 7. [The dNBR burn-source arm: built, tested, wired (deep)](#7-the-dnbr-burn-source-arm-built-tested-wired-deep)
 8. [The frozen score and within-fire ranking (deep)](#8-the-frozen-score-and-within-fire-ranking-deep)
-9. [Terrain-applicability refusal: the hypsometric gate (deep)](#9-terrain-applicability-refusal-the-hypsometric-gate-deep)
+9. [Terrain routing: range-front vs incised (deep)](#9-terrain-routing-range-front-vs-incised-deep)
 10. [Validation algorithms (brief-to-medium)](#10-validation-algorithms-brief-to-medium)
 11. [Parameter summary table](#11-parameter-summary-table)
 
@@ -34,43 +36,54 @@ The conceptual module order is `ingest → hydrology → delineate → score →
 
 ```
 DEM.tif ─┐
-         ├─> ingest.load_dem ─> A27 terrain gate ──(incised: span > 50 m)──> refusal.json   [STOP: no ranking]
+         ├─> ingest.load_dem ─> A39 terrain ROUTER (A27 detector, unmodified: span > 50 m
+         │                       = incised; runs FIRST on the raw DEM; ROUTES, no longer refuses)
          │                            │
-         │                            └──(range-front: proceed)─┐
-         │                                                      ▼
-         │                             hydrology.run_hydrology  (pysheds 5-step:
-         │                             fill pits -> fill depressions -> resolve flats
-         │                             -> D8 flow direction -> flow accumulation)
-         │                                                      │  fdir, acc
-         │                                                      ▼
-         │                             delineate.stage_2b_outlets   (canyon mouths)
-         │                             delineate.stage_2c_delineate (index-mode upslope
-         │                             catchments -> basins[])
-         │                                                      │
-SBS.tif ─┴─> ingest.ingest_burn                                │  basins[]
-             (A3: ONE source, never blended;                   │
-              A17 weight raster wt[], A18 coverage[];  wt, cov ─┤
-              A4 single Provenance stamp)                       │
-                                                                │
-   pipeline.mean_slope_tan(dem_raw) ──────────────── slope ─────┤
-                                                                ▼
-                                             score.stage_2e_score
-                                   mean_burn x mean_slope x area_km2
-                                   -> within-fire ordinal rank (score desc)
-                                                                │
-                              creeks.geojson ─> pipeline.evaluate
+         │              ┌─────────────┴──────────────┐
+         │        (range_front)                  (incised)
+         │              │                    incised + SBS present ─> GateAbort
+         │              │                    [STOP: v1 scope -- no both-arms shape
+         │              │                     for the mandatory disclaimer]
+         │              ▼                              ▼
+         │   hydrology.run_hydrology (pysheds 5-step, BOTH modes; unconditional)
+         │   fill pits -> fill depressions -> resolve flats -> D8 -> accumulation
+         │   + assert_master_outlet_scale (FM-1 scale-free guard, both modes)
+         │              │  fdir, acc                   │  dem_raw
+         │              ▼                              ▼
+         │  delineate.stage_2b_outlets          subbasins.segment_subbasins (WhiteboxTools:
+         │  (canyon mouths, CONTOUR_M)          breach-carve -> D8 -> accumulation ->
+         │  delineate.stage_2c_delineate        extract_streams -> whole-network Subbasins,
+         │  (index-mode catchments,             split at channel confluences)
+         │   asset filter applied)              subbasins.build_geometry_records (phase 1,
+         │              │  basins[]              DEM-only; drops footprint-truncated basins;
+         │              │                         empty -> GateAbort; NO asset filter)
+         │              └──────────────┬──────────────┘
+         │                             │  basins[]
+SBS.tif ─┴─> ingest.ingest_burn        │            (range-front only; incised+SBS aborted above)
+   or                                   │            (A3: ONE source, never blended; A4 Provenance)
+dNBR ──────> ingest.ingest_dnbr_both_arms (both arms; incised: subbasins.filter_burned_steep
+                                          phase 2 -- burn+slope geometry filter; empty -> GateAbort)
+                                                                          │  wt, covered
+   pipeline.mean_slope_tan(dem_raw) ──────────────────────── slope ──────┤
+                                                                          ▼
+                    score.stage_2e_score (SBS)  /  _score_one_arm x2 (dNBR, both arms)
+                    mean_burn x mean_slope x area_km2 -> within-fire ordinal rank (score desc)
+                    incised only: + score.add_intensity_rank (mean_burn x mean_slope,
+                    area-independent) -> HEADLINE ordering on incised output
+                                                                          │
+                              creeks.geojson ─> pipeline.evaluate (unchanged, both modes)
                               (truth match <= 250 m; tercile n//3; strict-pairwise rank-AUC)
-                                                                │
-                                                                ▼
-                                             outputs.write_outputs
+                                                                          ▼
+                    outputs.write_outputs (SBS)  /  write_dnbr_outputs (dNBR, both-arms writer)
                                      ranking.csv + basins.geojson
-                             (each stamped burn_source + SCREENING_STATEMENT)
+                    (stamped burn_source + SCREENING_STATEMENT; incised adds INCISED_FRAMING +
+                     WhiteboxTools engine provenance -- never a refusal.json on incised terrain)
 ```
 
 **Key design principle.** Two things are load-bearing and neither is negotiable.
 
 1. **The formula is frozen.** `mean_burn × mean_slope × contributing_area_km²` was pre-registered and validated. Changing the term order, the evaluation order, `BURN_WEIGHTS`, the dNBR bin/clamp/floor constants, or `DIRMAP`/`D8_OFFSETS` re-opens validation. These are the "category-two frozen fence." The known `× area` mis-ranking (a large moderately-burned basin can outrank a small severely-burned flowed one) is tracked as decision **C1** and deliberately left un-tuned.
-2. **The tool refuses on incised-upland terrain rather than emitting a low-confidence rank.** On terrain that is dissected highland all the way (no mountain-front break onto a plain), the `CONTOUR_M` outlet anchor is ill-posed and each of the score's three terms loses its referent. The tool writes an honest `refusal.json` with a reason and produces **no ranking**. The refusal is a feature, not a failure (decisions **A27**/**A28**).
+2. **Incised-upland terrain gets a disclaimed exploratory ranking, not a refusal (A39, supersedes A27/A28).** On terrain that is dissected highland all the way (no mountain-front break onto a plain), the `CONTOUR_M` outlet anchor is still ill-posed, but WhiteboxTools whole-network sub-basin segmentation removes the need for one: basins split at channel confluences instead of canyon mouths. The tool ranks these basins by `intensity` (`mean_burn × mean_slope`, area-independent), keeps the frozen `score` as a companion column, drops the drains-to-asset filter, and stamps every artifact with `INCISED_FRAMING` — **EXPLORATORY, UNVALIDATED ON THIS TERRAIN CLASS**. It is never confused with the validated range-front ranking. An incised fire that supplies SBS instead of dNBR still fails loud (§9); `refusal.json` is retained for other triggers but is not currently written by any live path (§9).
 
 ---
 
@@ -235,7 +248,7 @@ The crossing test is a pure D8 lookup: `D8_OFFSETS[int(fdir[r,c])]` gives the do
 
 The dedup is order-sensitive and that is the point. `raw.sort(key=lambda b: (-b["raw_km2"], row, col))` then a single shared `claimed` boolean grid with `own = mask & ~claimed; claimed |= own`. Reordering this sort silently changes which basin wins a contested cell, so it is frozen. Ties break by `(-area, row, col)` for determinism; with float areas no exact ties occur, so the keys only canonicalise label/claim order. Final `basin_id` is assigned by sorting the survivors on outlet `(row, col)`, giving a stable, reproducible labelling. Asset proximity uses a `scipy.spatial.cKDTree` over asset `(x, y)` and a `k=1` query against each basin's channel cells converted via `_rc_to_xy`.
 
-`CONTOUR_M` gets a fail-loud range guard before this runs: `assert_contour_in_dem_range` ([delineate.py:74-106](../src/delineate.py#L74-L106)) aborts if 150 m falls outside the DEM's valid min/max, catching a wrong-fire contour that would yield zero canyon mouths. It catches the gross numeric mis-set only, not geomorphic correctness; the geomorphic case is the A27 refusal in Section 9.
+`CONTOUR_M` gets a fail-loud range guard before this runs: `assert_contour_in_dem_range` ([delineate.py:74-106](../src/delineate.py#L74-L106)) aborts if 150 m falls outside the DEM's valid min/max, catching a wrong-fire contour that would yield zero canyon mouths. It catches the gross numeric mis-set only, not geomorphic correctness; the geomorphic case is the A27/A39 terrain router in Section 9.
 
 ---
 
@@ -383,40 +396,51 @@ The documented `× area` mis-ranking is verified, not hand-waved: `evaluate` com
 
 ---
 
-## 9. Terrain-applicability refusal: the hypsometric gate (deep)
+## 9. Terrain routing: range-front vs incised (deep)
 
-**Detector:** [delineate.py:119-170](../src/delineate.py#L119-L170)
-**Wiring:** [pipeline.py:297-329](../src/pipeline.py#L297-L329), called first in `run_pipeline` at [pipeline.py:382-385](../src/pipeline.py#L382-L385)
-**Constant:** `HYPSOMETRIC_SPAN_THRESHOLD_M = 50.0` at [delineate.py:116](../src/delineate.py#L116)
-**Decisions:** A27 (rule), **A28** (supersedes A27's caveated-ranking behavior), A31 (runs before hydrology)
-**Status:** built, wired, and tested end-to-end. Not a design on paper.
+**Detector:** [delineate.py:119-170](../src/delineate.py#L119-L170) — **unmodified** by A39
+**Router:** `_terrain_mode` at [pipeline.py:365-371](../src/pipeline.py#L365-L371); called first in `run_pipeline`, before SBS is opened or hydrology runs, at [pipeline.py:483-492](../src/pipeline.py#L483-L492)
+**Sub-basin engine (incised only):** [src/subbasins.py](../src/subbasins.py) — WhiteboxTools
+**Constant:** `HYPSOMETRIC_SPAN_THRESHOLD_M = 50.0` at [delineate.py:116](../src/delineate.py#L116) — **unmodified**; new `SUBBASIN_*` constants at [config.py:92-95](../src/config.py#L92-L95), see §11
+**Decisions:** A27 (rule, unmodified), A28 (superseded), A31 (DEM-first ordering, preserved), **A39** (supersedes A27's refuse-behavior clause and A28 — incised terrain ranks instead of refusing)
+**Status:** built, wired, and tested end-to-end (suite 261 green). Two tiers, two engines; the range-front path is byte-identical to pre-A39.
 
-### The rule
+### The rule (detector unchanged; only the response to it changed)
 
 ```
 valid   = finite DEM cells, and (if a nodata sentinel exists) != that sentinel
 p1, p10 = 1st and 10th percentiles of valid-cell elevation (m), method='linear'
 span_m  = p10 - p1
-REFUSE iff span_m > 50.0                                     # strict >
+INCISED iff span_m > 50.0                                    # strict >; was REFUSE, now a ROUTE
 ```
 
-On REFUSE the pipeline writes `refusal.json` ([outputs.py:67-102](../src/outputs.py#L67-L102)) and returns a refusal-result. It writes **no** `ranking.csv` and **no** `basins.geojson`. The refusal message is span-based ([outputs.py:41-64](../src/outputs.py#L41-L64)).
+`assess_hypsometric_applicability` — the detector itself — is retained **byte-identical**. What A39 changed is what happens with its verdict: instead of writing `refusal.json` and stopping, `span_m > 50.0` now selects the WhiteboxTools sub-basin engine (below) in place of the pysheds canyon-mouth engine. The refusal machinery (`write_refusal` / `build_refusal_message`, [outputs.py:41-102](../src/outputs.py#L41-L102)) is **not deleted** — `run_pipeline`'s polymorphic return contract and `dispatch_result`/`app.py`'s view model still support a `status="refused"` result for interface completeness and any future non-terrain refusal trigger — but as of this reconciliation **no live code path calls `write_refusal`**: terrain shape no longer refuses, and every other precondition failure (below) raises `GateAbort` directly rather than producing a `refusal.json`. Do not describe `refusal.json` as a currently-reachable output; it is a dormant, still-supported contract, not a live one.
 
 ### For the Environmental Scientist
 
-The whole method assumes one shape of landscape: steep mountains rising over a flatter plain, with creeks that leave the range at a mountain front and spill onto fans where people live. That mountain-front break is what the tool anchors its watersheds to.
+The whole method assumes one shape of landscape: steep mountains rising over a flatter plain, with creeks that leave the range at a mountain front and spill onto fans where people live. That mountain-front break is what the **range-front** method anchors its watersheds to.
 
-Some burned terrain isn't shaped like that. An **incised upland** is dissected highland all the way: deep valleys cut into high ground, with no plain to spill onto. On that terrain the method's assumptions quietly fail. There is no mountain-front break, so there are no canyon mouths to anchor to. There is no depositional plain, so "contributing area to an outlet" has no natural unit. And because everything is uniformly steep, the slope term stops telling basins apart. Every one of the score's three ingredients loses its meaning.
+Some burned terrain isn't shaped like that. An **incised upland** is dissected highland all the way: deep valleys cut into high ground, with no plain to spill onto. On that terrain the range-front method's assumptions quietly fail: there is no mountain-front break, so there are no canyon mouths to anchor to; there is no depositional plain, so "contributing area to an outlet" has no natural unit the way it does for a canyon-mouth catchment.
 
-So instead of emitting a low-confidence ranking that looks authoritative and isn't, the tool **declines, with a reason**. It measures one thing: how spread out the low elevations are. It takes the 1st and 10th percentiles of the terrain's elevation and looks at the gap between them. A true range-front-over-plain compresses that gap to roughly 20 to 30 m (the plain is a tight cluster of low elevations). An incised valley floor spreads it wide. If the gap exceeds 50 m, the terrain is incised, and the tool writes an honest refusal explaining that this is a known boundary of the method, not a failure. A refusal a practitioner can read beats a confident guess a practitioner might act on.
+Rather than force those same three ingredients onto terrain where they lose their referent, the tool switches to a **different measurement**. It still starts the same way — taking the 1st and 10th percentiles of the terrain's elevation and checking whether the gap between them is tight (a true range-front-over-plain, ~20–30 m) or wide (an incised valley floor, no compact plain) — but instead of stopping there, a wide gap now **routes** to a second engine built for exactly this terrain: WhiteboxTools delineates the whole drainage network into sub-basins wherever channels meet (a confluence), using a conditioning method (breach-carving) that preserves incised channels instead of filling them level. Those sub-basins are then ranked by burn × slope alone — the area term is dropped, because it has no anchored meaning on a basin whose boundary comes from a segmentation threshold rather than a canyon mouth — and the whole result is labeled **exploratory and unvalidated on this terrain class**, kept visibly separate from the validated range-front ranking. A practitioner who said "even rough information would be really helpful" about exactly this terrain (the stakeholder request behind this decision, vault `DECISIONS.md` A39) gets a ranked starting point instead of nothing, with the uncertainty stated up front rather than hidden.
 
 ### For the Programmer
 
-`assess_hypsometric_applicability` computes `np.percentile(valid_elevations, [1, 10], method='linear')` and refuses on `span_m = p10 - p1 > 50.0` (strict `>`; the exact `== 50.0` boundary does not refuse, pinned by test). `_valid_dem_mask` ([delineate.py:49-68](../src/delineate.py#L49-L68)) is the single source of truth for "which cells are terrain" (finite and, critically, `!= nodata`; pysheds clamps an undeclared nodata to 0, so failing to exclude it collapses the valid min to 0). An all-nodata DEM raises `GateAbort` (a broken input is fail-loud, not an "incised" verdict).
+`assess_hypsometric_applicability` is untouched: `np.percentile(valid_elevations, [1, 10], method='linear')`, `span_m = p10 - p1 > 50.0` (strict `>`; the exact `== 50.0` boundary does not route to incised, pinned by test). `_valid_dem_mask` ([delineate.py:49-68](../src/delineate.py#L49-L68)) is still the single source of truth for "which cells are terrain." The **firewall** — the detector returns exactly `{refuse, reason_code, span_m, span_threshold_m, n_valid}`, no absolute elevation, no `CONTOUR_M` candidate — is unchanged and still adversarially tested ([tests/test_a27_applicability.py](../tests/test_a27_applicability.py) group D). An all-nodata DEM still raises `GateAbort` directly (a broken input, not an "incised" verdict).
 
-The **firewall** is load-bearing and adversarially tested ([tests/test_a27_applicability.py](../tests/test_a27_applicability.py) group D): the detector returns exactly `{refuse, reason_code, span_m, span_threshold_m, n_valid}`. `span_m` is a difference (a vertical extent), the only elevation-derived number that leaves the function. `p1` and `p10` are logged and discarded, never returned. No absolute elevation and no `CONTOUR_M` candidate crosses the boundary, because a meters value feeding anything downstream would be a tuning knob and would put this rule on the category-two scoring fence. The signature is `(dem_raw, dem_nodata)` only, with no threshold parameter and no `config.py` override path.
+What changed is the caller. `_terrain_mode` wraps the same detector and returns `("incised" if verdict["refuse"] else "range_front", verdict)`; `run_pipeline` reads `terrain_mode` **first**, on the raw DEM, before SBS is opened or hydrology runs (A31's ordering is preserved), and branches:
 
-**A28 supersedes A27's original "caveated ranking" clause.** A27 first ratified "return the still-valid ranking, anchoring caveated," on the premise that the ranking is independent of the mountain front. Later incised-terrain analysis refuted that premise, and A28 ratified the shipped behavior: on incised upland the ranking is not merely un-anchored, it is meaningless, because `contributing_area_km²` has no discrete outlet, `mean_slope` stops discriminating on uniformly-steep terrain, and there is no plain-referenced discharge point to define the ranking unit. So **no ranking is produced**. Per A31 ([pipeline.py:374-385](../src/pipeline.py#L374-L385)), the gate runs on the raw DEM **before** SBS is opened or hydrology runs, so an un-assessed dNBR-only incised fire (South Fork) reaches an honest refusal end-to-end instead of crashing on a missing SBS. Montecito's span is ~15 m, so it passes the gate and the behavior lock is untouched. The end-to-end refusal path is verified hermetically ([tests/test_a31_reorder.py](../tests/test_a31_reorder.py)) and is non-vacuous: reverting the reorder makes the test fail.
+- **`incised` + an SBS burn input present** → immediate `GateAbort` ([pipeline.py:485-492](../src/pipeline.py#L485-L492)): "incised terrain with an SBS burn input is not supported in v1 (A39)." The SBS single-arm path has no both-arms shape to hang the mandatory disclaimer and UI branch on, so running it would silently emit an **undisclaimed** ranking. This is a v1 scope guard, not a science gate — see [[FAILURE_MODES]] FM-18 in the vault; the fix for a real incised+SBS fire is a dNBR input, not a code change.
+- **`incised`, dNBR (or no burn opened yet)** → `subbasins.segment_subbasins` ([subbasins.py:33-94](../src/subbasins.py#L33-L94)) conditions the DEM with WhiteboxTools `BreachDepressionsLeastCost` (`SUBBASIN_BREACH_DIST_CELLS`) — not pysheds' fill-based conditioning, which raises an incised canyon floor to its spill level and smears the channel, the specific failure mode this terrain triggers — then runs `D8Pointer → D8FlowAccumulation → ExtractStreams` (`SUBBASIN_ACC_THRESHOLD_CELLS`) `→ Subbasins`, a whole-network split at every channel confluence. `build_geometry_records` ([subbasins.py:117-144](../src/subbasins.py#L117-L144), phase 1 — DEM-only, because burn weights and slope do not exist yet at the delineation call site) drops any label touching the raster border **or** abutting invalid/nodata terrain via `_footprint_edge_ids` ([subbasins.py:97-114](../src/subbasins.py#L97-L114); border-only checking is not enough — an interior nodata hole truncates a basin just as surely as the outer edge, silently yielding partial area and burn stats otherwise; see [[FAILURE_MODES]] FM-19) and any basin under `MIN_BASIN_KM2` (reused, no new area floor). An outlet is the max-flow-accumulation cell inside the basin, not the minimum-elevation cell (breach-carving can leave an interior elevation artifact). Zero survivors → `GateAbort` ([pipeline.py:517-521](../src/pipeline.py#L517-L521)). The drains-to-asset filter is **not** applied (A39 clause 5 — a wilderness incised fire would otherwise silently re-derive the old refusal by filtering to zero basins; `asset_m` is hardcoded `None`). After the dNBR both-arms ingest, `filter_burned_steep` ([subbasins.py:147-176](../src/subbasins.py#L147-L176), phase 2) drops any basin whose burned-cell fraction (`burn_weight > 0`, reusing the frozen burn binning — no second severity threshold) is below `SUBBASIN_BURN_FRAC_MIN`, or whose mean slope is below `SUBBASIN_SLOPE_FLOOR_TAN`; zero survivors → `GateAbort` ([pipeline.py:577-581](../src/pipeline.py#L577-L581)). Basin membership is fixed by **Arm A**; Arm B ([pipeline.py:606-607](../src/pipeline.py#L606-L607)) scores the identical set so `rank_delta` stays a meaningful comparison.
+- **`range_front`** → unchanged: `assert_contour_in_dem_range` → `stage_2b_outlets` → `stage_2c_delineate`, with the asset filter applied, byte-identical to pre-A39.
+
+Hydrology (`stage_2a_hydrology`) and the FM-1 `assert_master_outlet_scale` guard run **unconditionally for both modes** ([pipeline.py:499-500](../src/pipeline.py#L499-L500)) — incised terrain still needs the pysheds `fdir`/`acc` chain for slope's neighbourhood math, and the master-outlet check is a DEM sanity floor, not a range-front-only concern.
+
+On incised output, `score.add_intensity_rank` ([pipeline.py:614-616](../src/pipeline.py#L614-L616)) adds `intensity = mean_burn × mean_slope` — the frozen score with the area exponent set to zero, which A39 explicitly binds as a use of the deferred **C1** area-dampening family, scoped to incised terrain only; promoting it to range-front output is forbidden by the decision. Rows are then ordered by `intensity_rank`; `score`/`rank` (the frozen formula) ride along as companion columns, never dropped. `outputs.write_dnbr_outputs` stamps `INCISED_FRAMING` (verbatim EXPLORATORY / UNVALIDATED language, [outputs.py:187-202](../src/outputs.py#L187-L202)) plus WhiteboxTools engine provenance (`engine`, `wbt_version`, `acc_threshold_cells`, `breach_dist_cells`) in place of the plain provenance a range-front artifact carries; the `incised=False` default keeps pre-A39 callers byte-identical.
+
+> **Surviving limitation, not solved by A39.** A28 gave three reasons an incised ranking is meaningless. A39 answers the area argument (`intensity`) and the ranking-unit argument (confluence splits). Verbatim from the vault `DECISIONS.md` A39 entry: "It does NOT rebut the second: that `mean_slope` may stop discriminating on uniformly steep dissected highland, in which case `intensity` degenerates toward a burn-severity map. This is an ACKNOWLEDGED OPEN LIMITATION carried verbatim in `INCISED_FRAMING`, not a solved problem." `INCISED_FRAMING` itself says: "KNOWN OPEN LIMITATION: where dissected terrain is uniformly steep, mean_slope may not discriminate between basins, in which case this ordering approaches a burn-severity ranking."
+>
+> **The supporting evidence is range-front evidence, not incised-terrain evidence.** The pre-ratification confirmation run at shipping parameters (`MIN_BASIN_KM2 = 0.1`) reproduces, on **Montecito** — verbatim from vault `DECISIONS.md` A39: "88 basins, AUC(intensity) 0.887, AUC(size) 0.790, 10/10 of the top-10 intensity-ranked basins flowed" (22/25 of top-25). That is the validated range-front case re-run under the incised engine's segmentation parameters, and it rests on "6 independent flow events — effective n = 6": "consistency-with-known-outcome, not generalizable predictive skill." The first incised-terrain evidence is a separate, later, pre-registered concordance check against a USGS assessment; its result is out of scope for this document and is not cited here.
 
 ---
 
@@ -481,7 +505,11 @@ Every flowed/non-flowed pair is checked; a flowed basin must **strictly** outsco
 | `CELL_M` | 10.0 m | [config.py:55](../src/config.py#L55) | DEM resolution; `dx = dy`; slope spacing; `CELL_AREA_KM2 = 1e-4` |
 | `DIRMAP` | `(64,128,1,2,4,8,16,32)` | [config.py:66](../src/config.py#L66) | **Frozen fence.** pysheds D8 encoding, `(N,NE,E,SE,S,SW,W,NW)` |
 | `D8_OFFSETS` | code -> `(drow,dcol)` map | [config.py:67-68](../src/config.py#L67-L68) | **Frozen fence.** Decodes `fdir` to the downstream step at outlet detection |
-| `HYPSOMETRIC_SPAN_THRESHOLD_M` | 50.0 m | [delineate.py:116](../src/delineate.py#L116) | A27 refusal trigger; frozen, no per-fire override, no config entry |
+| `HYPSOMETRIC_SPAN_THRESHOLD_M` | 50.0 m | [delineate.py:116](../src/delineate.py#L116) | A27/A39 terrain-router trigger (span > 50 m ⟹ incised engine); frozen, no per-fire override, no config entry |
+| `SUBBASIN_ACC_THRESHOLD_CELLS` | 3000 cells (~0.30 km²) | [config.py:92](../src/config.py#L92) | **Frozen fence (A39).** WhiteboxTools trunk-network channel threshold for confluence splitting on incised terrain (~6× the range-front `ACC_THRESHOLD_CELLS`) |
+| `SUBBASIN_BURN_FRAC_MIN` | 0.25 | [config.py:93](../src/config.py#L93) | **Frozen fence (A39).** Minimum burned-cell fraction to keep an incised sub-basin (phase 2) |
+| `SUBBASIN_SLOPE_FLOOR_TAN` | 0.05 (~2.9°) | [config.py:94](../src/config.py#L94) | **Frozen fence (A39).** Drops degenerate flat incised sub-basins only; NOT result-blind (set after seeing output — see vault `DECISIONS.md` A39) |
+| `SUBBASIN_BREACH_DIST_CELLS` | 100 cells (1 km at 10 m) | [config.py:95](../src/config.py#L95) | **Frozen fence (A39).** WhiteboxTools least-cost breach search radius, incised conditioning only |
 | Score formula | `mean_burn × mean_slope × area_km2` | [score.py:56](../src/score.py#L56) | **Frozen fence.** Term + evaluation order frozen (IEEE non-associativity) |
 | `MASTER_KNOWN_KM2` | 39.19 km² | [config.py:73](../src/config.py#L73) | **Print-only reference** (see note); no live logic keys off it. Reconstructed master = 44.7273 |
 | `MASTER_MIN_AOI_FRACTION` | 0.05 | [config.py:81](../src/config.py#L81) | **FM-1 scale-free floor** (A38). `master_km2 ÷ valid-AOI` must be ≥ this, else GateAbort. Derived: Montecito 0.2648 ÷ ~5 |
@@ -493,3 +521,5 @@ Every flowed/non-flowed pair is checked; a flowed basin must **strictly** outsco
 > **Master-outlet guard is SCALE-FREE (A38, supersedes T5).** The FM-1 anti-collapse check no longer bins the domain pour-point into PASS / FINDING / ABORT km² bands centered on `MASTER_KNOWN_KM2` — those flagged on absolute size (calibrated to Montecito) and did not generalize. It now aborts iff the master catchment is a below-floor **fraction of the AOI's valid DEM area**: `assert_master_outlet_scale` ([pipeline.py:214](../src/pipeline.py#L214)) GateAborts when `master_km2` is non-finite/≤0, `valid_area_km2` ≤ 0, or `master_km2 / valid_area_km2 < MASTER_MIN_AOI_FRACTION` (0.05). Lower-only (a master ≈ AOI is a clean single-drainage crop). The reconstructed Montecito master is **44.7273 km²** = **26.5%** of its 168.93 km² valid AOI ([test_behavior_lock.py:94](../tests/test_behavior_lock.py#L94)) → well above the 5% floor, so it does not abort. `MASTER_KNOWN_KM2 = 39.19` survives only as a print-only reference in `validation/gate.py`; treat 44.7273 as truth. There is **no per-fire delineation-confidence surface** — the guard is a binary collapse detector (none until the P4 reference check).
 
 **Frozen fence, restated:** the score formula, `BURN_WEIGHTS`, the `DNBR_*` bin/clamp/floor constants, and `DIRMAP`/`D8_OFFSETS` are category-two frozen. Changing any of them re-opens validation. They are documented here as frozen for that reason.
+
+The four `SUBBASIN_*` constants (A39) are frozen the same way, scoped to the **incised tier only** — never promotable to range-front scoring. Unlike the others, their provenance is explicitly **not result-blind**: the author had already seen South Fork / Trout / Montecito / Cooks Peak / Putah output at these settings before they were frozen, and the slope floor specifically was added after degenerate flat basins appeared in that output (vault `DECISIONS.md` A39). Carried here as an honest caveat on the evidence, not a license to re-tune.

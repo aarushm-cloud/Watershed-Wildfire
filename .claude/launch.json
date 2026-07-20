@@ -1,0 +1,20 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "wws-streamlit",
+      "runtimeExecutable": "/Users/aarushmadhireddy/miniconda3/envs/wildfire-watershed/bin/streamlit",
+      "runtimeArgs": [
+        "run",
+        "/Users/aarushmadhireddy/Documents/Wildfire-Watershed-incised/app.py",
+        "--server.port",
+        "8501",
+        "--server.headless",
+        "true",
+        "--browser.gatherUsageStats",
+        "false"
+      ],
+      "port": 8501
+    }
+  ]
+}

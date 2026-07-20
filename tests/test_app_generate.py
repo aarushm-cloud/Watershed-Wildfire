@@ -165,12 +165,24 @@ def test_contour_m_threads_through_generate_path_to_pipeline(monkeypatch, tmp_pa
     assert calls["run"][0][1].get("contour_m") == 1900.0
 
 
-def test_run_generated_screening_refusal_unsoftened(monkeypatch, tmp_path):
-    refused = {"status": "refused", "message": "no mountain front", "reason_code": "terrain"}
-    calls = _wire_downstream(monkeypatch, tmp_path, refused)
+def test_run_generated_screening_incised_sbs_abort_is_not_softened(monkeypatch, incised_fire):
+    """A39: incised terrain no longer refuses (the old REFUSED-status fake this test drove through
+    _wire_downstream can no longer happen), so this locks the invariant against the real, reachable
+    failure instead -- incised+SBS is a hard GateAbort (Task 8). run_generated_screening must still
+    reduce it to a legible error, never a ranking, and write no artifacts."""
+    fire = dict(incised_fire)
+    fire["sbs"] = "data/southfork/burn/arm_a_cls.tif"   # any real path -- never opened before the abort
+    fire["dnbr"] = None
+    monkeypatch.setattr(dc, "create_dnbr", lambda *a, **k: {"dnbr_tif": "d.tif"})
+    import acquire
+    monkeypatch.setattr(acquire, "build_fire_config", lambda *a, **k: fire)
+    from src import outputs as outs
+    write_calls = []
+    monkeypatch.setattr(outs, "write_dnbr_outputs", lambda *a, **k: write_calls.append((a, k)))
     out = app.run_generated_screening(BBOX, _package()["pair"])
-    assert out["kind"] == "refused" and "mountain front" in out["message"]
-    assert calls["write"] == []                          # no ranking artifacts on a refusal
+    assert out["kind"] == "error"
+    assert "incised" in out["message"].lower()
+    assert write_calls == []                              # no ranking artifacts on the abort
 
 
 def test_run_generated_screening_creator_abort_is_legible(monkeypatch, tmp_path):

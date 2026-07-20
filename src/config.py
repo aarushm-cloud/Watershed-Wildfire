@@ -84,3 +84,12 @@ MASTER_MIN_AOI_FRACTION = 0.05
 DIRMAP = (64, 128, 1, 2, 4, 8, 16, 32)
 D8_OFFSETS = {64: (-1, 0), 128: (-1, 1), 1: (0, 1), 2: (1, 1),
               4: (1, 0), 8: (1, -1), 16: (0, -1), 32: (-1, -1)}
+
+# --- A39 incised-terrain sub-basin segmentation (WhiteboxTools path) ---------
+# FROZEN at A39 ratification. Provenance (NOT result-blind) is documented in
+# the A39 entry of DECISIONS.md. Never tune to make a run or test look better.
+# Minimum basin size reuses MIN_BASIN_KM2; "burned cell" reuses the frozen burn binning.
+SUBBASIN_ACC_THRESHOLD_CELLS = 3000    # 0.30 km2 trunk network for confluence splitting
+SUBBASIN_BURN_FRAC_MIN = 0.25          # keep basins at least a quarter burned
+SUBBASIN_SLOPE_FLOOR_TAN = 0.05        # ~2.9 deg -- drops degenerate flat basins only
+SUBBASIN_BREACH_DIST_CELLS = 100       # WBT least-cost breach search radius (1 km at 10 m)

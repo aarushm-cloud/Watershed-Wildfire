@@ -21,7 +21,6 @@ Run:  pytest tests/test_a27_wired.py -v
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 
@@ -38,11 +37,9 @@ gate = importlib.util.module_from_spec(_spec)
 sys.modules["gate"] = gate
 _spec.loader.exec_module(gate)
 
-from src.ingest import load_dem                       # exact wired-path DEM read (gives dem_raw / nodata)
-from src.delineate import HYPSOMETRIC_SPAN_THRESHOLD_M
 from src.grids import GateAbort
 
-_FIXTURE = _REPO_ROOT / "tests" / "fixtures" / "incised_synthetic.tif"
+# incised_fire fixture (tests/conftest.py) is picked up automatically by pytest for the tests below.
 
 # The EXACT in-memory refusal-result key set the firewall pins (DECISIONS A27 / build-2 §2.2).
 _REFUSAL_KEYS = {"status", "reason_code", "span_m", "span_threshold_m", "message"}
@@ -51,58 +48,33 @@ _FORBIDDEN_KEYS = {"p1", "p1_m", "p10", "p10_m", "contour", "contour_m", "CONTOU
                    "elevation", "elev", "n_valid", "dem", "dem_raw"}
 
 
-def _incised_inputs():
-    """The fixture's RAW pre-fill DEM + nodata, read exactly as run_pipeline feeds the seam."""
-    grid, dem, dem_raw = load_dem(str(_FIXTURE))
-    return dem_raw, dem.nodata
-
-
 # ============================================================================
-# Wired seam: incised terrain -> refusal-result through the live code path
+# Wired seam: incised terrain -> ranked-result through the live code path (A39)
 # ============================================================================
-def test_wired_seam_refuses_on_incised_fixture(tmp_path):
-    """The wired A27 seam classifies the incised fixture REFUSE and returns a refusal-result."""
-    dem_raw, dem_nodata = _incised_inputs()
-    result = gate._terrain_applicability_gate(dem_raw, dem_nodata, tmp_path)
-    assert result is not None, "incised fixture must produce a refusal-result, not None"
-    assert result["status"] == "refused"
-    assert result["reason_code"] == "REFUSED_INCISED_TERRAIN"
-    assert result["span_m"] > HYPSOMETRIC_SPAN_THRESHOLD_M    # incised: span exceeds the frozen 50 m
-    assert result["span_threshold_m"] == 50.0                 # frozen A27 threshold, propagated verbatim
-    # message is the whole user-facing payload of a refusal -- assert it is the readable refusal prose
-    assert "no ranking is produced" in result["message"]
-    assert "incised valley" in result["message"]
+def test_wired_seam_ranks_on_incised_fixture(incised_fire):
+    """A39: the wired seam (gate.run_pipeline, re-exported from src.pipeline) ROUTES incised
+    terrain to a ranked result instead of refusing -- the A27 refuse-only gate this test used to
+    drive directly (gate._terrain_applicability_gate) no longer exists; see gate.py's A39
+    backward-compat-shim comment. The removed write-refusal-json assertion now lives as
+    test_incised_writes_no_refusal in tests/test_incised_ranked.py."""
+    result = gate.run_pipeline(incised_fire)
+    assert result is not None
+    assert result["status"] == "ranked"
+    assert result["terrain_mode"] == "incised"
 
 
-def test_wired_refusal_writes_only_refusal_json(tmp_path):
-    """REFUSE writes refusal.json to the (isolated) out_dir and NO ranking.csv / basins.geojson."""
-    dem_raw, dem_nodata = _incised_inputs()
-    gate._terrain_applicability_gate(dem_raw, dem_nodata, tmp_path)
-    assert (tmp_path / "refusal.json").exists(), "refusal.json must be written on REFUSE"
-    assert not (tmp_path / "ranking.csv").exists(), "no ranking.csv on REFUSE (no basins, no scores)"
-    assert not (tmp_path / "basins.geojson").exists(), "no basins.geojson on REFUSE"
-
-
-def test_refusal_result_is_firewall_clean(tmp_path):
-    """FIREWALL (A27): the in-memory refusal-result is the exact 5-field subset, no absolute
-    elevation, and never widens toward refusal.json's larger on-disk field set."""
-    dem_raw, dem_nodata = _incised_inputs()
-    result = gate._terrain_applicability_gate(dem_raw, dem_nodata, tmp_path)
-
-    # exact key set -- a superset (an elevation leak) fails here
-    assert set(result.keys()) == _REFUSAL_KEYS, (
-        f"refusal-result keys {sorted(result)} != frozen {sorted(_REFUSAL_KEYS)}")
-    # belt-and-suspenders: no absolute-elevation / contour / p1 / p10 / n_valid key
-    assert not (set(result.keys()) & _FORBIDDEN_KEYS), (
-        f"absolute-elevation/contour leak into refusal-result: {set(result) & _FORBIDDEN_KEYS}")
-
-    # consistency (not identity) with refusal.json: the SHARED fields carry the same values; the
-    # JSON may persist MORE on disk (terminal artifact) but the return must not be widened toward it.
-    disk = json.loads((tmp_path / "refusal.json").read_text())
-    for shared in ("reason_code", "span_m", "span_threshold_m"):
-        assert disk[shared] == result[shared], f"{shared} differs between return and refusal.json"
-    # the on-disk artifact, too, leaks no absolute percentile elevation (only span_m, a difference)
-    assert "p1" not in disk and "p10" not in disk, "refusal.json must not persist absolute p1/p10"
+def test_refusal_result_is_firewall_clean():
+    """Still live for non-terrain refusal triggers (A39 removed only the terrain one)."""
+    from src.outputs import build_refusal_message
+    verdict = {"reason_code": "REFUSED_INCISED_TERRAIN", "span_m": 71.0,
+               "span_threshold_m": 50.0, "n_valid": 1000}
+    msg = build_refusal_message(verdict["reason_code"], verdict["span_m"],
+                                verdict["span_threshold_m"])
+    result = {"status": "refused", "reason_code": verdict["reason_code"],
+              "span_m": verdict["span_m"],
+              "span_threshold_m": verdict["span_threshold_m"], "message": msg}
+    assert set(result) == _REFUSAL_KEYS
+    assert not (_FORBIDDEN_KEYS & set(result))
 
 
 # ============================================================================

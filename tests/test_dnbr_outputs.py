@@ -12,7 +12,10 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
+import rasterio
+from rasterio.transform import from_origin
 
 _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
@@ -114,3 +117,90 @@ def test_dnbr_csv_and_geojson_carry_slope_coverage_flag(tmp_path):
     fc = json.loads(Path(gj_path).read_text())
     props0 = fc["features"][0]["properties"]
     assert "low_slope_coverage" in props0 and "slope_coverage_frac" in props0
+
+
+# ---- Task 7: INCISED_FRAMING, conditional intensity columns, ordering, engine provenance -------
+
+def test_accepted_fire_schema_is_unchanged(tmp_path):
+    """REGRESSION LOCK: the incised path must not alter accepted-fire output."""
+    csv_path, _ = _run_and_write(tmp_path)
+    header, rows = _read_rows(csv_path)
+    assert list(rows[0].keys()) == [
+        "basin_id", "rank", "score", "rank_b", "score_b", "rank_delta",
+        "mean_burn_a", "mean_burn_b", "mean_slope", "slope_coverage_frac",
+        "low_slope_coverage", "area_km2", "burn_coverage_frac", "low_coverage",
+        "flowed", "matched_creek", "nearest_outlet_dist_m",
+    ]
+    assert not any("EXPLORATORY" in h for h in header), \
+        "an accepted fire must never carry the incised disclaimer"
+
+
+def _write_fake_dem(tmp_path, n=4):
+    """Tiny synthetic GeoTIFF (mirrors tests/test_entrypoint.py::_write_synthetic_dem) -- adaptation:
+    write_dnbr_outputs unconditionally opens dem_tif to build the GeoJSON, real fire or not, so the
+    fake-arm tests below need an openable raster rather than the brief's literal "dem.tif" string."""
+    path = tmp_path / "fake_dem.tif"
+    transform = from_origin(500000.0, 3800000.0, 10.0, 10.0)
+    with rasterio.open(path, "w", driver="GTiff", height=n, width=n, count=1,
+                       dtype="float32", crs="EPSG:32611", transform=transform) as d:
+        d.write(np.full((n, n), 100.0, dtype="float32"), 1)
+    return str(path)
+
+
+def _fake_arm(n=3, incised=True):
+    basins = []
+    for i in range(n):
+        mask = np.zeros((4, 4), dtype=bool)
+        mask[1:3, 1:3] = True   # a 2x2 block -> a non-empty polygon when vectorised (adaptation:
+        #                         the brief's basins had no "mask"; write_dnbr_outputs needs one for
+        #                         every basin to build the GeoJSON, incised or not).
+        b = {"basin_id": i, "rank": n - i, "score": 0.1 * (n - i),
+             "mean_burn": 0.4, "mean_slope": 0.3 + 0.1 * i, "area_km2": 1.0,
+             "burn_coverage_frac": 1.0, "low_coverage": False,
+             "slope_coverage_frac": 1.0, "low_slope_coverage": False,
+             "mask": mask}
+        if incised:
+            b["intensity"] = b["mean_burn"] * b["mean_slope"]
+            # adaptation: NOT "n - i" (== rank) -- that would make the rows already come out of the
+            # rank-ordered loop in intensity_rank order too, so the ordering test below would pass
+            # even if the code never sorted by intensity_rank. i + 1 decouples the two orderings.
+            b["intensity_rank"] = i + 1
+        basins.append(b)
+    ranked = sorted(basins, key=lambda b: b["rank"])
+    return {"basins": basins, "ranked": ranked, "n_ties": 0, "metrics": {}}
+
+
+def test_incised_appends_intensity_and_stamps_disclaimer(tmp_path):
+    from src.outputs import write_dnbr_outputs, INCISED_FRAMING
+    csv_path, _ = write_dnbr_outputs(
+        _fake_arm(), _fake_arm(), None, tmp_path, _write_fake_dem(tmp_path), "incised_test",
+        incised=True, subbasin_meta={"engine": "whiteboxtools", "wbt_version": "v2.4.0",
+                                     "acc_threshold_cells": 3000, "breach_dist_cells": 100})
+    header, rows = _read_rows(csv_path)
+    assert list(rows[0].keys())[-2:] == ["intensity", "intensity_rank"]
+    assert any(INCISED_FRAMING in h for h in header)
+    assert "EXPLORATORY" in INCISED_FRAMING
+
+
+def test_incised_rows_are_ordered_by_intensity(tmp_path):
+    """A39: intensity is the HEADLINE ordering -- a practitioner reading top-down must
+    read it, not the frozen score order."""
+    from src.outputs import write_dnbr_outputs
+    csv_path, _ = write_dnbr_outputs(_fake_arm(), _fake_arm(), None, tmp_path,
+                                     _write_fake_dem(tmp_path), "incised_test", incised=True)
+    _, rows = _read_rows(csv_path)
+    assert [int(r["intensity_rank"]) for r in rows] == sorted(
+        int(r["intensity_rank"]) for r in rows)
+
+
+def test_incised_stamps_engine_provenance(tmp_path):
+    from src.outputs import write_dnbr_outputs
+    _, gj_path = write_dnbr_outputs(
+        _fake_arm(), _fake_arm(), None, tmp_path, _write_fake_dem(tmp_path), "incised_test",
+        incised=True, subbasin_meta={"engine": "whiteboxtools", "wbt_version": "v2.4.0",
+                                     "acc_threshold_cells": 3000, "breach_dist_cells": 100})
+    import json
+    prov = json.loads(gj_path.read_text())["provenance"]
+    assert prov["basin_engine"] == "whiteboxtools"
+    assert prov["wbt_version"] == "v2.4.0"
+    assert prov["acc_threshold_cells"] == 3000

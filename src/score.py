@@ -79,3 +79,22 @@ def stage_2e_score(wt, covered, slope, basins):
     scores = [b["score"] for b in basins]
     n_ties = len(scores) - len(set(round(s, 12) for s in scores))
     return order, n_ties
+
+
+def add_intensity_rank(basins):
+    """A39 -- the area-independent ordering used on incised terrain.
+
+    intensity = mean_burn * mean_slope: the frozen score with the area term removed,
+    because on incised terrain basin extent is set by the segmentation threshold rather
+    than a physical outlet, so the area term has no anchored meaning. This is an
+    ADDITIONAL column; `score` and `rank` are untouched.
+
+    Bounded by A39: incised terrain only. Promoting this to accepted fires requires
+    opening C1 under its own governance.
+    """
+    for b in basins:
+        b["intensity"] = b["mean_burn"] * b["mean_slope"]
+    order = sorted(basins, key=lambda b: (-b["intensity"], b["basin_id"]))
+    for i, b in enumerate(order, 1):
+        b["intensity_rank"] = i
+    return order

@@ -4,8 +4,9 @@ A31 moves the A27 terrain-applicability gate AHEAD of stage_2a_hydrology in run_
 refuses on the raw DEM ALONE -- before any SBS is opened or hydrology runs. This file locks the three
 DISTINCT outcomes of the input-shape matrix (do not conflate them):
 
-  1. REFUSAL (incised DEM, sbs=None)   -> run_pipeline returns a refusal-result + writes refusal.json,
-                                          WITHOUT opening SBS. (test_hermetic_end_to_end_refusal)
+  1. INCISED-RANKS (incised DEM, sbs=None) -> run_pipeline ROUTES (A39) to a ranked-result, WITHOUT
+                                          opening SBS; no refusal.json is written.
+                                          (test_hermetic_end_to_end_incised_ranks)
   2. BAD-PATH (dem = missing file)     -> run_pipeline RAISES (library contract), NOT a SystemExit.
                                           (test_bad_dem_path_raises_not_systemexit)
   3. DATA-ABSENT (driver layer)        -> run.run_fire / _assert_inputs_present exits with a clean
@@ -18,7 +19,6 @@ Run:  pytest tests/test_a31_reorder.py -v
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 
@@ -36,57 +36,32 @@ _spec.loader.exec_module(gate)
 
 import run  # the production driver (imports gate; no side effects at import -- argparse is inside main())
 
-_FIXTURE = _REPO_ROOT / "tests" / "fixtures" / "incised_synthetic.tif"
+# incised_fire fixture (tests/conftest.py) is picked up automatically by pytest below.
 
 
 # ============================================================================
-# 1. REFUSAL -- hermetic end-to-end through run_pipeline (the A31 guarantee)
+# 1. INCISED-RANKS -- hermetic end-to-end through run_pipeline (the A31 guarantee, A39 outcome)
 # ============================================================================
-def test_hermetic_end_to_end_refusal(tmp_path):
-    """An incised-DEM fire with NO SBS runs end-to-end through run_pipeline to a refusal.
+def test_hermetic_end_to_end_incised_ranks(incised_fire):
+    """An incised-DEM fire with NO SBS runs end-to-end through run_pipeline to a RANKED result.
 
-    This is the A31 GUARANTEE: because the terrain gate now precedes stage_2a, a fire with sbs=None
-    refuses on the DEM alone -- the SBS is never opened. Uses the committed incised fixture and an
-    ISOLATED tmp out_dir (a shared OUT could pass vacuously off a stale refusal.json).
+    The A31 guarantee (the terrain gate precedes stage_2a, so classification runs on the DEM alone
+    before any SBS is opened) is unchanged; A39 changed only the OUTCOME -- incised terrain now
+    ROUTES to a ranked sub-basin result instead of refusing, so no refusal.json is written.
+    result["terrain_mode"] being present proves classification ran.
 
-    NON-VACUITY: if the A31 reorder were reverted (gate back AFTER stage_2a), stage_2a would run first
-    and call rasterio.open(fire["sbs"]) with sbs=None -- which raises BEFORE any refusal.json is
-    written. run_pipeline would then raise instead of returning a refusal, so both the returned-status
-    assertion and the on-disk content assertion below would fail. This test therefore fails if the
-    ordering regresses.
+    Uses the incised_fire fixture (tests/conftest.py): the old inline fire config here had no
+    'dnbr' key and assets=None, which only worked because the gate refused before either input was
+    needed. Execution now continues past the gate, so a real dnbr is required (incised terrain still
+    skips assets -- A39 -- so assets=None stays valid for this fixture).
     """
-    fire = {
-        "name": "hermetic_incised",
-        "dem": _FIXTURE,
-        "sbs": None,                 # no SBS: must never be opened before the terrain gate refuses
-        "assets": None,              # nothing between DEM-load and the gate consumes assets/creeks
-        "creeks": None,
-        "out_dir": tmp_path,         # isolated: refusal.json content assertion must be non-vacuous
-        "expected_crs": "EPSG:32613",
-        "validation_case": "hermetic_incised_refusal",
-    }
+    result = gate.run_pipeline(incised_fire)
 
-    result = gate.run_pipeline(fire)
-
-    # (a) run_pipeline returns the polymorphic refusal-result (lowercase 'refused' discriminator)
     assert result is not None
-    assert result["status"] == "refused", f"expected a refusal-result, got {result.get('status')!r}"
-    assert result["reason_code"] == "REFUSED_INCISED_TERRAIN"
+    assert result["status"] == "ranked", f"expected a ranked-result, got {result.get('status')!r}"
+    assert result["terrain_mode"] == "incised"
 
-    # (b) refusal.json exists in the tmp out_dir AND its CONTENT proves a real refusal. NOTE: the on-disk
-    # schema uses "status": "REFUSED" / "ranking_produced": false (write_refusal); there is NO "refuse"
-    # boolean key in refusal.json (that key lives only on the in-memory verdict), so we assert the real
-    # persisted fields rather than a nonexistent "refuse == true".
-    refusal_json = tmp_path / "refusal.json"
-    assert refusal_json.exists(), "refusal.json must be written to the fire's out_dir on REFUSE"
-    disk = json.loads(refusal_json.read_text())
-    assert disk["status"] == "REFUSED"
-    assert disk["ranking_produced"] is False
-    assert disk["reason_code"] == "REFUSED_INCISED_TERRAIN"
-
-    # (c) the SBS was never produced: no ranking artifacts behind a refusal
-    assert not (tmp_path / "ranking.csv").exists()
-    assert not (tmp_path / "basins.geojson").exists()
+    assert not (incised_fire["out_dir"] / "refusal.json").exists()
 
 
 # ============================================================================

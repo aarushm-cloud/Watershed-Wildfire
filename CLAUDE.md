@@ -315,13 +315,14 @@ architectural or method change.** The load-bearing ones:
 - **Python 3.11** in a conda env named `wildfire-watershed`.
 - **`numpy < 2`** (pysheds 0.5 calls the removed `np.in1d`).
 - Stack: `pysheds`, `rasterio`, `geopandas`, `shapely`, `fiona`, `pandas`, `requests`.
-- **`environment.yml` is currently a placeholder.** The real lockfile gets pinned once P0.5
-  reproduces the validated result (decisions A13/C3). When you add a dependency, update it.
+- **`environment.yml` is pinned; `environment.lock.yml` is the captured conda lockfile** (A13/C3),
+  landed 2026-06-15 once P0.5 reproduced the validated result. When you add a dependency, update both.
 - **Run contract:** `python run.py --fire <name>` → writes deliverables to `out/<fire>/`.
 
-**P0 preconditions not yet met (verified 2026-06-06):** the repo is **not git-initialized**
-(`git init` is part of the P0 gate); `environment.yml` is a placeholder; and the recovered
-`VALIDATION_REPORT.md` is not in the repo (see Validation Oracle).
+**P0 preconditions met (verified 2026-07-06):** the repo is **git-initialized** (first commit
+2026-06-06, branch `main`); `environment.yml` **and** the captured `environment.lock.yml` are tracked
+(lockfile landed 2026-06-15, A13/C3); and the recovered `VALIDATION_REPORT.md` **is committed** at
+`validation/VALIDATION_REPORT.md` (2026-06-12) as the read-only oracle (see Validation Oracle).
 
 ---
 

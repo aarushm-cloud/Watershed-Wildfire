@@ -76,8 +76,10 @@ def result_to_view(result: dict) -> dict:
             return {"kind": "unknown",                 # no 'arms' -- degrade, never KeyError
                     "message": "Ranked result has no 'arms' (the UI expects the dNBR both-arms shape)."}
         arm_a = arms["arm_a"]
-        return {"kind": "ranked", "n_basins": len(arm_a["basins"]),
+        view = {"kind": "ranked", "n_basins": len(arm_a["basins"]),
                 "headline_arm": result.get("headline_arm", "arm_a")}
+        view["incised"] = (result.get("terrain_mode") == "incised")
+        return view
     return {"kind": "unknown", "message": f"Unexpected pipeline result status: {status!r}."}
 
 
@@ -90,12 +92,16 @@ def basin_rows(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA) -> list
     for feat in fc.get("features", []):
         p = feat.get("properties", {})
         delta = p.get("rank_delta", abs((p.get("rank") or 0) - (p.get("rank_b") or 0)))
-        rows.append({"basin_id": p.get("basin_id"), "rank": p.get("rank"),
-                     "mean_burn": p.get("mean_burn_a", p.get("mean_burn")),   # Arm A binned burn (headline)
-                     "mean_slope": p.get("mean_slope"), "area_km2": p.get("area_km2"),
-                     "score": p.get("score"),
-                     "rank_b": p.get("rank_b"), "score_b": p.get("score_b"),
-                     "rank_delta": delta, "uncertain": delta >= uncertain_delta})
+        row = {"basin_id": p.get("basin_id"), "rank": p.get("rank"),
+               "mean_burn": p.get("mean_burn_a", p.get("mean_burn")),   # Arm A binned burn (headline)
+               "mean_slope": p.get("mean_slope"), "area_km2": p.get("area_km2"),
+               "score": p.get("score"),
+               "rank_b": p.get("rank_b"), "score_b": p.get("score_b"),
+               "rank_delta": delta, "uncertain": delta >= uncertain_delta}
+        if "intensity" in p:   # A39: only present on incised (WhiteboxTools sub-basin) features
+            row["intensity"] = p["intensity"]
+            row["intensity_rank"] = p["intensity_rank"]
+        rows.append(row)
     rows.sort(key=lambda r: (r["rank"] is None, r["rank"]))
     return rows
 
@@ -202,7 +208,9 @@ def run_screening(bbox_raw, dnbr_file, *, name="frontend", contour_m=150.0):
             csv_path, gj_path = write_dnbr_outputs(
                 result["arms"]["arm_a"], result["arms"]["arm_b"], result["creek_nearest"],
                 fire["out_dir"], fire["dem"],
-                validation_case=f"{fire['name']} (coordinate entry, dNBR both-arms)")
+                validation_case=f"{fire['name']} (coordinate entry, dNBR both-arms)",
+                incised=(result.get("terrain_mode") == "incised"),
+                subbasin_meta=result.get("subbasin_meta"))
             try:
                 fc = json.loads(Path(gj_path).read_text())
             except json.JSONDecodeError as e:   # a truncated geojson WE wrote is an internal fault, not
@@ -210,7 +218,7 @@ def run_screening(bbox_raw, dnbr_file, *, name="frontend", contour_m=150.0):
                 # render the cryptic JSONDecodeError verbatim through the domain-message catch below.
                 raise RuntimeError(f"wrote an unreadable basins.geojson at {gj_path}: {e}") from e
             return {"kind": "ranked", "n": view["n_basins"], "fc": fc,
-                    "csv": Path(csv_path).read_bytes()}
+                    "csv": Path(csv_path).read_bytes(), "incised": view["incised"]}
         if view["kind"] == "refused":
             return {"kind": "refused", "message": view["message"]}
         return {"kind": "error", "message": view.get("message", "Unexpected pipeline result.")}
@@ -323,13 +331,15 @@ def run_generated_screening(bbox_raw, pair, *, name="frontend", contour_m=150.0)
             csv_path, gj_path = write_dnbr_outputs(
                 result["arms"]["arm_a"], result["arms"]["arm_b"], result["creek_nearest"],
                 fire["out_dir"], fire["dem"],
-                validation_case=f"{fire['name']} (auto-acquire, dNBR both-arms)")
+                validation_case=f"{fire['name']} (auto-acquire, dNBR both-arms)",
+                incised=(result.get("terrain_mode") == "incised"),
+                subbasin_meta=result.get("subbasin_meta"))
             try:
                 fc = json.loads(Path(gj_path).read_text())
             except json.JSONDecodeError as e:
                 raise RuntimeError(f"wrote an unreadable basins.geojson at {gj_path}: {e}") from e
             return {"kind": "ranked", "n": view["n_basins"], "fc": fc,
-                    "csv": Path(csv_path).read_bytes(),
+                    "csv": Path(csv_path).read_bytes(), "incised": view["incised"],
                     "quicklook": Path(created["quicklook_png"]).read_bytes(),
                     "dnbr_provenance": json.loads(Path(created["provenance_json"]).read_text())}
         if view["kind"] == "refused":
@@ -646,6 +656,17 @@ def main():
         return
 
     fc = screen["fc"]
+    if screen.get("incised"):
+        st.warning(
+            "**Exploratory result — incised terrain.** This fire lacks the "
+            "range-front-over-plain shape the validated method assumes, so basins are "
+            "whole-network sub-basins split at confluences rather than canyon-mouth "
+            "catchments; individual boundaries may be approximate. Read it as relative "
+            "**source susceptibility** for triage — it does not indicate runout, deposition, "
+            "or which fan is threatened. The method has **not been validated on this terrain "
+            "class**. Rows are ordered by **intensity** (burn × slope), which does not depend "
+            "on basin size."
+        )
     st.success(f"Ranked {screen['n']} basins — Arm A (binned) is the headline; "
                f"Arm B (continuous) rides alongside.")
     st_folium(build_basin_map(fc), height=520, use_container_width=True, key="result_map")
@@ -660,26 +681,32 @@ def main():
             "treat that basin as rank-uncertain.\n"
             "- **Score** — the frozen `mean burn × mean slope × contributing area`, a within-fire "
             "ordinal ranking only (not comparable across fires).\n"
-            "- **A refusal instead of a ranking** — on incised-valley terrain with no mountain-front "
-            "break there are no canyon mouths to anchor to, so the tool refuses rather than force a "
-            "ranking. A known boundary of the method, not a failure."
+            "- **Two terrain tiers** — range-front fires (canyon mouths draining onto a plain) get "
+            "the validated `score` ranking; incised-valley fires (no range-front break to anchor "
+            "to) get an exploratory sub-basin ranking instead, led by **intensity** (burn × slope) "
+            "because basin size doesn't carry the same meaning without canyon-mouth catchments."
         )
 
     # B: surface the frozen score's inputs (burn x slope x area) beside the score so the ranking is
     # auditable; readable headers via column_config (the score carries the formula as a tooltip).
-    st.dataframe(
-        basin_rows(fc), use_container_width=True,
-        column_config={
-            "basin_id": "Basin", "rank": "Rank (Arm A)",
-            "mean_burn": st.column_config.NumberColumn("Mean burn (Arm A)", format="%.4f"),
-            "mean_slope": st.column_config.NumberColumn("Mean slope", format="%.4f"),
-            "area_km2": st.column_config.NumberColumn("Area (km²)", format="%.4f"),
-            "score": st.column_config.NumberColumn(
-                "Score", help="= mean burn × mean slope × area (frozen; within-fire ordinal)"),
-            "rank_b": "Rank (Arm B)", "score_b": "Score (Arm B)",
-            "rank_delta": "Rank Δ", "uncertain": "Rank-uncertain",
-        },
-    )
+    rows = basin_rows(fc)
+    column_config = {
+        "basin_id": "Basin", "rank": "Rank (Arm A)",
+        "mean_burn": st.column_config.NumberColumn("Mean burn (Arm A)", format="%.4f"),
+        "mean_slope": st.column_config.NumberColumn("Mean slope", format="%.4f"),
+        "area_km2": st.column_config.NumberColumn("Area (km²)", format="%.4f"),
+        "score": st.column_config.NumberColumn(
+            "Score", help="= mean burn × mean slope × area (frozen; within-fire ordinal)"),
+        "rank_b": "Rank (Arm B)", "score_b": "Score (Arm B)",
+        "rank_delta": "Rank Δ", "uncertain": "Rank-uncertain",
+    }
+    if screen.get("incised"):   # A39: intensity is the headline ordering on incised terrain
+        rows = sorted(rows, key=lambda r: r["intensity_rank"])
+        column_config["intensity"] = st.column_config.NumberColumn(
+            "Intensity", format="%.4f",
+            help="= mean burn × mean slope (headline order on incised terrain; independent of area)")
+        column_config["intensity_rank"] = "Intensity rank"
+    st.dataframe(rows, use_container_width=True, column_config=column_config)
     st.caption("Screening score = mean burn severity × mean slope × contributing area (km²) — the "
                "frozen formula, ranked within this fire only. Not a probability or a prediction.")
     st.download_button("Download ranking.csv", screen["csv"],

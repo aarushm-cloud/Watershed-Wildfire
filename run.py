@@ -85,7 +85,9 @@ def run_fire(fire):
             # A34 dNBR both-arms: Arm A headline + Arm B companion + rank_delta (src/outputs.write_dnbr_outputs)
             csv_path, gj_path = write_dnbr_outputs(
                 result["arms"]["arm_a"], result["arms"]["arm_b"], result["creek_nearest"],
-                fire["out_dir"], fire["dem"], validation_case=fire["validation_case"])
+                fire["out_dir"], fire["dem"], validation_case=fire["validation_case"],
+                incised=(result.get("terrain_mode") == "incised"),
+                subbasin_meta=result.get("subbasin_meta"))
             n = len(result["arms"]["arm_a"]["basins"])
             print(f"[{fire['name']}] ranked (dNBR both-arms): {n} basins; wrote {csv_path} , {gj_path}")
         else:

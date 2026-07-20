@@ -54,10 +54,14 @@ from src.outputs import write_outputs
 # src/pipeline.py. Re-export them so existing `gate.X` / `from validation.gate import X` call sites
 # (run.py, the p2_* scripts, test_behavior_lock, test_entrypoint, test_a27_wired, test_a31_reorder)
 # resolve unchanged. Values are byte-identical to the pre-move gate.py definitions.
+# A39: _terrain_applicability_gate (refuse-only) was replaced by _terrain_mode (route, not refuse) in
+# src/pipeline.py; the re-export name follows it. test_a27_wired.py's three wired-seam tests call the
+# old name directly (`gate._terrain_applicability_gate`) and now fail with AttributeError -- that is
+# the expected, Task-11-owned consequence of the A27->A39 gate->router change, not a regression here.
 from src.pipeline import (
     run_pipeline, dispatch_result, evaluate,
     _load_dem_artifacts, stage_2a_hydrology, mean_slope_tan,
-    compute_creek_nearest, _terrain_applicability_gate,
+    compute_creek_nearest, _terrain_mode,
     MONTECITO_FIRE, SOUTHFORK_FIRE, CELL_AREA_KM2,
     ROOT, DATA, OUT, DEM_TIF, SBS_TIF, ASSETS_GJ, CREEKS_GJ,
 )

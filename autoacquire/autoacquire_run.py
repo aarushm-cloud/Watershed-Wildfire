@@ -63,6 +63,8 @@ def run_autoacquire(bbox, *, ignition, containment, out_dir, name="fire",
             result["arms"]["arm_a"], result["arms"]["arm_b"], result["creek_nearest"],
             fire["out_dir"], fire["dem"],
             validation_case=f"{name} (auto-acquire, dNBR both-arms)",
+            incised=(result.get("terrain_mode") == "incised"),
+            subbasin_meta=result.get("subbasin_meta"),
         )
     return ran
 

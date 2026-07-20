@@ -182,8 +182,28 @@ DNBR_FRAMING = (
     "where the two burn methods disagree -- treat those ranks as uncertain.")
 
 
+# A39 incised-terrain framing, carried on every incised (WhiteboxTools sub-basin) dNBR artifact --
+# exploratory, unvalidated on this terrain class. Do not soften.
+INCISED_FRAMING = (
+    "EXPLORATORY -- INCISED TERRAIN (A39). This fire lacks the range-front-over-plain "
+    "geometry the validated method assumes. Basins are whole-network sub-basins split at "
+    "channel confluences by WhiteboxTools -- NOT canyon-mouth catchments, NOT anchored to a "
+    "mountain front -- so individual boundaries may be approximate. Read this as relative "
+    "SOURCE susceptibility for triage only: it does NOT indicate runout, deposition, or "
+    "which fan is threatened. Within-fire ordinal only -- never compare across fires. "
+    "UNVALIDATED ON THIS TERRAIN CLASS: the method's outcome evidence comes from one "
+    "range-front fire (Montecito, effective n=6 flow events), not from incised terrain. "
+    "Rows are ordered by `intensity` (mean_burn x mean_slope), which is independent of "
+    "basin size; the `score` column retains the frozen burn x slope x area formula but its "
+    "area term depends on the segmentation threshold here. KNOWN OPEN LIMITATION: where "
+    "dissected terrain is uniformly steep, mean_slope may not discriminate between basins, "
+    "in which case this ordering approaches a burn-severity ranking. For an authoritative "
+    "assessment consult USGS or your state geological survey."
+)
+
+
 def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
-                       validation_case):
+                       validation_case, incised=False, subbasin_meta=None):
     """Write {out_dir}/{ranking.csv, basins.geojson} for the dNBR BOTH-ARMS path (A34/P2.2c).
 
     Arm A (binned) is the headline ranking (rank/score); Arm B (continuous) rides alongside
@@ -195,7 +215,11 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
     validation_case -- REQUIRED provenance stamp (no default: a careless direct caller must not silently
     stamp a real fire "Montecito"). creek_nearest -- per-creek nearest-outlet info, or None (a real fire
     with no truth-creek layer).
-    out_dir -- output dir; dem_tif -- DEM path for the GeoJSON transform/CRS re-open (A25)."""
+    out_dir -- output dir; dem_tif -- DEM path for the GeoJSON transform/CRS re-open (A25).
+    incised -- A39 sub-basin path: appends intensity/intensity_rank, orders rows by intensity_rank,
+    stamps INCISED_FRAMING, adds engine provenance. Default False is byte-identical to pre-A39 output.
+    subbasin_meta -- WhiteboxTools engine metadata (engine/wbt_version/acc_threshold_cells/
+    breach_dist_cells), stamped into GeoJSON provenance when incised."""
     if not arm_a["basins"]:                            # F9: never emit an empty artifact (A8 fail-loud)
         raise ValueError("write_dnbr_outputs: refusing to write outputs for 0 basins -- the "
                          "delineation produced none; an empty ranking is indistinguishable from a "
@@ -215,7 +239,7 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
         bid = a["basin_id"]
         b = b_by[bid]
         near = nearest_by_basin.get(bid, (None, None))
-        rows.append({
+        row = {
             "basin_id": bid,
             "rank": a["rank"], "score": round(a["score"], 6),            # Arm A -- headline
             "rank_b": b["rank"], "score_b": round(b["score"], 6),        # Arm B -- companion
@@ -229,7 +253,13 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
             "low_coverage": a["low_coverage"],
             "flowed": a.get("flowed", False), "matched_creek": a.get("matched_creek", ""),
             "nearest_outlet_dist_m": round(near[1], 1) if near[1] is not None else "",
-        })
+        }
+        if incised:   # A39: appended LAST -- pandas headers follow dict insertion order
+            row["intensity"] = a.get("intensity")
+            row["intensity_rank"] = a.get("intensity_rank")
+        rows.append(row)
+    if incised:   # A39: intensity is the headline ordering on incised terrain, not the frozen rank
+        rows.sort(key=lambda r: r["intensity_rank"])
     df = pd.DataFrame(rows)
     csv_path = out_dir / "ranking.csv"
     with open(csv_path, "w") as fh:
@@ -237,6 +267,8 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
         # pd.read_csv(path, comment='#'); the default reader would treat them as data rows.
         fh.write(f"# {SCREENING_STATEMENT}\n")
         fh.write(f"# {DNBR_FRAMING}\n")
+        if incised:
+            fh.write(f"# {INCISED_FRAMING}\n")
         fh.write(f"# burn_source=dNBR  validation_case={validation_case}\n")
         df.to_csv(fh, index=False)
 
@@ -252,7 +284,7 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
         polys = [shapely_shape(geom) for geom, val in
                  rfeatures.shapes(mask, mask=a["mask"], transform=transform) if val == 1]
         geoms.append(unary_union(polys))
-        props.append({"basin_id": bid, "rank": a["rank"], "score": round(a["score"], 6),
+        feat_props = {"basin_id": bid, "rank": a["rank"], "score": round(a["score"], 6),
                       "rank_b": b["rank"], "score_b": round(b["score"], 6),
                       "rank_delta": abs(a["rank"] - b["rank"]),
                       "mean_burn_a": round(a["mean_burn"], 4), "mean_burn_b": round(b["mean_burn"], 4),
@@ -262,16 +294,28 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
                       "burn_coverage_frac": round(a["burn_coverage_frac"], 4),
                       "low_coverage": a["low_coverage"],                          # minor: parity with the CSV
                       "flowed": a.get("flowed", False), "matched_creek": a.get("matched_creek", ""),
-                      "burn_source": "dNBR", "screening": SCREENING_STATEMENT})
+                      "burn_source": "dNBR", "screening": SCREENING_STATEMENT}
+        if incised:
+            feat_props["intensity"] = a.get("intensity")
+            feat_props["intensity_rank"] = a.get("intensity_rank")
+        props.append(feat_props)
     gdf = gpd.GeoDataFrame(props, geometry=geoms, crs=dem_crs).to_crs("EPSG:4326")
     gj_path = out_dir / "basins.geojson"
     gdf.to_file(gj_path, driver="GeoJSON")
     with open(gj_path) as fh:
         fc = json.load(fh)
-    fc["provenance"] = {"burn_source": "dNBR", "screening": SCREENING_STATEMENT,
-                        "dnbr_framing": DNBR_FRAMING, "headline_arm": "arm_a (binned)",
-                        "companion_arm": "arm_b (continuous)",
-                        "validation_case": validation_case, "crs": "EPSG:4326"}
+    provenance = {"burn_source": "dNBR", "screening": SCREENING_STATEMENT,
+                 "dnbr_framing": DNBR_FRAMING, "headline_arm": "arm_a (binned)",
+                 "companion_arm": "arm_b (continuous)",
+                 "validation_case": validation_case, "crs": "EPSG:4326"}
+    if incised:
+        provenance["incised_framing"] = INCISED_FRAMING
+        if subbasin_meta:
+            provenance["basin_engine"] = subbasin_meta.get("engine")
+            provenance["wbt_version"] = subbasin_meta.get("wbt_version")
+            provenance["acc_threshold_cells"] = subbasin_meta.get("acc_threshold_cells")
+            provenance["breach_dist_cells"] = subbasin_meta.get("breach_dist_cells")
+    fc["provenance"] = provenance
     with open(gj_path, "w") as fh:
         json.dump(fc, fh)
     return csv_path, gj_path

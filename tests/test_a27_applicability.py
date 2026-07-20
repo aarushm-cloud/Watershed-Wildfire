@@ -34,7 +34,7 @@ from src.delineate import (
 )
 from src.grids import GateAbort
 from src.ingest import load_dem
-from src.outputs import build_refusal_message, write_refusal
+from src.outputs import build_refusal_message
 
 _REPO = Path(__file__).resolve().parent.parent
 
@@ -134,40 +134,35 @@ def test_A_characterization_ocean_block_inflates_span():
 
 
 # ===================================================================================================
-# Test B -- incised refusal: synthetic fixture (blocker) + South Fork (corroboration)
+# Test B -- incised DETECTION: synthetic fixture (blocker) + South Fork (corroboration).
+# A39: the detector is UNCHANGED -- it still flags incised terrain (refuse=True). Only the WIRED
+# consequence changed (route to a ranked sub-basin result, not refuse); that consequence is locked
+# in tests/test_incised_ranked.py, not here. These two stay detector-only.
 # ===================================================================================================
-def test_B_synthetic_fixture_refuses_and_writes_refusal(tmp_path):
-    """BLOCKER, hermetic: the committed synthetic incised fixture matches its pinned SHA, refuses
-    cleanly, and write_refusal emits a complete refusal.json with NO ranking artifacts and NO
-    exception."""
+def _load_fixture(path: Path = SYNTH_FIXTURE):
+    """Load a DEM fixture and return (dem_raw, nodata) -- the exact detector inputs."""
+    _grid, dem, dem_raw = load_dem(path)
+    return dem_raw, dem.nodata
+
+
+def test_B_synthetic_fixture_is_detected_as_incised():
+    """A39: the detector still FLAGS incised terrain -- it now routes instead of refusing.
+    The wired consequence is locked in tests/test_incised_ranked.py."""
     assert SYNTH_FIXTURE.exists(), f"committed fixture missing: {SYNTH_FIXTURE}"
     assert _sha256(SYNTH_FIXTURE) == SYNTH_SHA256, "synthetic fixture SHA drift (regenerate + repin)"
 
-    _grid, dem, dem_raw = load_dem(SYNTH_FIXTURE)
-    verdict = assess_hypsometric_applicability(dem_raw, dem.nodata)
+    dem, nodata = _load_fixture()
+    verdict = assess_hypsometric_applicability(dem, nodata)
     assert verdict["refuse"] is True
     assert verdict["reason_code"] == "REFUSED_INCISED_TERRAIN"
     assert verdict["span_m"] > HYPSOMETRIC_SPAN_THRESHOLD_M
 
-    refusal_path = write_refusal(verdict, tmp_path)           # must not raise
-    assert refusal_path.exists()
-    payload = json.loads(refusal_path.read_text())
-    for key in ("status", "reason_code", "trigger", "span_m", "span_threshold_m", "n_valid",
-                "message", "screening", "ranking_produced", "explanation"):
-        assert key in payload, f"refusal.json missing required field: {key}"
-    assert payload["status"] == "REFUSED"
-    assert payload["ranking_produced"] is False
-    assert payload["trigger"] == "hypsometric_span"
-    # on REFUSE no ranking artifacts are written
-    assert not (tmp_path / "ranking.csv").exists()
-    assert not (tmp_path / "basins.geojson").exists()
-
 
 def test_B_southfork_corroboration():
     """CORROBORATION (non-blocking if absent): the real South Fork DEM is gitignored, so it may not
-    be present on a clean checkout. If present, it must match the manifest SHA and REFUSE with a span
-    in (50, 200) m (logged, not pinned). If absent, skip loudly. If present and it does NOT refuse,
-    that is a hard FAIL."""
+    be present on a clean checkout. If present, it must match the manifest SHA and the detector must
+    flag refuse=True with a span in (50, 200) m (logged, not pinned). If absent, skip loudly. If
+    present and the detector does NOT flag it, that is a hard FAIL."""
     if not SOUTHFORK_DEM.exists():
         pytest.skip(f"CORROBORATION UNAVAILABLE: {SOUTHFORK_DEM} absent (gitignored). "
                     f"Pinned SHA lives in {SF_MANIFEST} (raster_sha256). Does not fail the suite.")
@@ -175,10 +170,10 @@ def test_B_southfork_corroboration():
     expected_sha = manifest["raster_sha256"]["data/southfork/dem/dem.tif"]
     assert _sha256(SOUTHFORK_DEM) == expected_sha, "South Fork DEM SHA != manifest (wrong/altered raster)"
 
-    _grid, dem, dem_raw = load_dem(SOUTHFORK_DEM)
-    verdict = assess_hypsometric_applicability(dem_raw, dem.nodata)
+    dem, nodata = _load_fixture(SOUTHFORK_DEM)
+    verdict = assess_hypsometric_applicability(dem, nodata)
     print(f"\n[B] South Fork corroboration: span_m={verdict['span_m']:.4f}  refuse={verdict['refuse']}")
-    assert verdict["refuse"] is True, "South Fork (incised) must REFUSE -- corroboration FAILED."
+    assert verdict["refuse"] is True, "South Fork (incised) detector must flag refuse=True -- corroboration FAILED."
     assert 50.0 < verdict["span_m"] < 200.0, (
         f"South Fork span {verdict['span_m']:.2f} m outside the (50, 200) sanity band.")
 
