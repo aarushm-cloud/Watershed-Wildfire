@@ -33,7 +33,7 @@ _REPO_ROOT = Path(__file__).resolve().parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from src.grids import GateAbort
-from src.outputs import SCREENING_STATEMENT
+from src.outputs import SCREENING_STATEMENT, DUAL_RANK_MAP_NAME
 
 # |rankA - rankB| at/above which a basin is flagged "rank uncertain" (display heuristic, Tier-2, not
 # a science value): the honest surfacing of Arm A / Arm B disagreement (A34 rank_delta).
@@ -217,8 +217,12 @@ def run_screening(bbox_raw, dnbr_file, *, name="frontend", contour_m=150.0):
                 # a domain bbox/scale error -- route it to the backstop (type-named + logged) rather than
                 # render the cryptic JSONDecodeError verbatim through the domain-message catch below.
                 raise RuntimeError(f"wrote an unreadable basins.geojson at {gj_path}: {e}") from e
-            return {"kind": "ranked", "n": view["n_basins"], "fc": fc,
-                    "csv": Path(csv_path).read_bytes(), "incised": view["incised"]}
+            screen = {"kind": "ranked", "n": view["n_basins"], "fc": fc,
+                      "csv": Path(csv_path).read_bytes(), "incised": view["incised"]}
+            map_png = Path(fire["out_dir"]) / DUAL_RANK_MAP_NAME   # A39: incised runs only
+            if view["incised"] and map_png.exists():
+                screen["map_png"] = map_png.read_bytes()
+            return screen
         if view["kind"] == "refused":
             return {"kind": "refused", "message": view["message"]}
         return {"kind": "error", "message": view.get("message", "Unexpected pipeline result.")}
@@ -338,10 +342,14 @@ def run_generated_screening(bbox_raw, pair, *, name="frontend", contour_m=150.0)
                 fc = json.loads(Path(gj_path).read_text())
             except json.JSONDecodeError as e:
                 raise RuntimeError(f"wrote an unreadable basins.geojson at {gj_path}: {e}") from e
-            return {"kind": "ranked", "n": view["n_basins"], "fc": fc,
-                    "csv": Path(csv_path).read_bytes(), "incised": view["incised"],
-                    "quicklook": Path(created["quicklook_png"]).read_bytes(),
-                    "dnbr_provenance": json.loads(Path(created["provenance_json"]).read_text())}
+            screen = {"kind": "ranked", "n": view["n_basins"], "fc": fc,
+                      "csv": Path(csv_path).read_bytes(), "incised": view["incised"],
+                      "quicklook": Path(created["quicklook_png"]).read_bytes(),
+                      "dnbr_provenance": json.loads(Path(created["provenance_json"]).read_text())}
+            map_png = Path(fire["out_dir"]) / DUAL_RANK_MAP_NAME   # A39: incised runs only
+            if view["incised"] and map_png.exists():
+                screen["map_png"] = map_png.read_bytes()
+            return screen
         if view["kind"] == "refused":
             return {"kind": "refused", "message": view["message"]}
         return {"kind": "error", "message": view.get("message", "Unexpected pipeline result.")}
@@ -711,6 +719,9 @@ def main():
                "frozen formula, ranked within this fire only. Not a probability or a prediction.")
     st.download_button("Download ranking.csv", screen["csv"],
                        file_name="ranking.csv", mime="text/csv")
+    if screen.get("map_png"):   # A39: the static dual-rank map travels on incised runs only
+        st.download_button("Download dual-rank map (PNG)", screen["map_png"],
+                           file_name=DUAL_RANK_MAP_NAME, mime="image/png")
 
     # AA-4: when this ranking came from an auto-acquired dNBR, show what was built --
     # the quicklook + the creator's audit record (scenes, dates, scaling, masks).

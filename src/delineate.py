@@ -131,10 +131,12 @@ def assess_hypsometric_applicability(dem_raw: np.ndarray, dem_nodata) -> dict:
     leaves the function; an absolute percentile elevation must not. Returns EXACTLY
     `{refuse, reason_code, span_m, span_threshold_m, n_valid}` -- no p1_m/p10_m, no contour-like key.
 
-    On REFUSE the pipeline produces NO ranking: the scored basins are the upslope catchments of
-    CONTOUR_M-anchored outlets (delineate.py outlets -> basins -> scores), an anchor incised terrain
-    cannot define -- no anchor, no basins, no scores to caveat (A27.1). The caller writes a
-    structured refusal instead (src.outputs.write_refusal); this function only classifies.
+    On refuse=True the verdict now ROUTES rather than refuses (A39): canyon-mouth anchoring is
+    ill-posed here -- the scored basins would be the upslope catchments of CONTOUR_M-anchored
+    outlets (delineate.py outlets -> basins -> scores), an anchor incised terrain cannot define
+    (A27.1) -- so the caller (src.pipeline._terrain_mode) selects the WhiteboxTools sub-basin
+    engine instead. The refusal-writing machinery (write_refusal) is removed; this function only
+    classifies.
 
     dem_raw     -- raw metric DEM (m); read-only (a fancy-index copy is taken, never mutated).
     dem_nodata  -- the DEM's nodata sentinel (see _valid_dem_mask; FM-12).

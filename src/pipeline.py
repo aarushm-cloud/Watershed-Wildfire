@@ -59,8 +59,6 @@ from src.delineate import (stage_2b_outlets, stage_2c_delineate, assert_contour_
                            assess_hypsometric_applicability, _valid_dem_mask)
 # Frozen scoring + ranking (src/score.py); the frozen formula + per-basin reduction live there.
 from src.score import stage_2e_score
-# Refusal artifact + human message (src/outputs.py); the A27 gate writes refusal.json via these.
-from src.outputs import write_refusal, build_refusal_message
 
 _log = logging.getLogger(__name__)
 
@@ -358,9 +356,10 @@ def evaluate(basins, ranked, creek_nearest, match_m):
 
 # ---------------------------------------------------------------------------
 # A39 terrain router (supersedes the A27 refusal gate) -- DECISIONS A27/A27.1/A39.
-# write_refusal/build_refusal_message stay imported though this module no longer calls them itself:
-# they remain outputs.py's public refusal-writing contract (Task 11 / other callers may still reach
-# it), so the import is left intact rather than pruned as part of this route-not-refuse change.
+# write_refusal was removed (post-review ruling): once terrain shape stopped triggering it, it had
+# no live caller left, production or test. build_refusal_message stays in src/outputs.py for its one
+# remaining caller (tests/test_a27_applicability.py group C, the detector's message unit tests) but
+# is no longer imported here since this module never called it either.
 # ---------------------------------------------------------------------------
 def _terrain_mode(dem_raw, dem_nodata):
     """A39 -- classify terrain to ROUTE, not to refuse. Supersedes the A27 gate.
@@ -593,6 +592,8 @@ def run_pipeline(fire=None, contour_m=None):
                 "FAIL: no sub-basins are both sufficiently burned and steep on incised "
                 "terrain (A39). The burn may not intersect mapped drainage. Do NOT emit an "
                 "empty ranking.")
+        outlets = [b["outlet"] for b in basins]   # rebuild from the FINAL (phase-2) basin set -- the
+        # phase-1 outlets above describe basins that filter_burned_steep may have dropped (owner ruling)
 
     # dNBR NoData/cloud guard (A8; P2.1 §4 path 1). HARD abort on the guarded set: flowed (truth) basins
     # when creeks exist (P2.3-harness parity, byte-identical), else ALL scored basins (a real frontend fire

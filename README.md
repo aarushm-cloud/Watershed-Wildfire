@@ -255,7 +255,7 @@ Wildfire-Watershed/
 │
 ├── run.py                     # production driver: python run.py --fire <name>
 ├── acquire.py                 # coordinate acquisition (the network boundary): bbox → staged DEM + assets
-├── app.py                     # local Streamlit frontend: bbox + dNBR (upload or generate) → ranked map + CSV, or refusal
+├── app.py                     # local Streamlit frontend: bbox + dNBR (upload or generate) → ranked map + CSV (exploratory-flagged on incised terrain), or refusal
 │
 ├── src/                       # the pipeline (pure Python, no network)
 │   ├── config.py              # per-fire scalar tunables (contour, thresholds, burn weights, dNBR + subbasin constants)

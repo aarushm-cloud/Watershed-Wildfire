@@ -1,17 +1,14 @@
-"""P3.4-build-2 WIRED-PATH tests for the A27 terrain-applicability refusal.
+"""A39-era WIRED-PATH tests for the terrain router + polymorphic dispatch.
 
-Build-1 tested the detector (`assess_hypsometric_applicability`) and the artifact writer
-(`write_refusal` / `build_refusal_message`) in ISOLATION. This file proves the refusal is reached
-through `validation/gate.py`'s live wiring: the A27-before-A25 seam (`_terrain_applicability_gate`)
--> `write_refusal` -> the polymorphic `run_pipeline` return contract -> caller-side `dispatch_result`.
-A test that only re-called the detector would NOT exercise build-2.
-
-STRATEGY (b): drive the wired refusal seam directly with the committed synthetic incised fixture's
-RAW DEM (the same `dem_raw` / `dem_nodata` `run_pipeline` feeds the seam), instead of parameterizing
-the Montecito-hardcoded `run_pipeline` (option (a), higher blast radius -- D0). Every refusal/wired
-test writes to an ISOLATED tmp_path (pytest), NEVER out/montecito or validation/out: `write_refusal`
-does not delete stale ranking.csv/basins.geojson, so the 'ranking absent' assertion is only
-meaningful in a fresh dir (FM-9 output-clobbering avoidance).
+Originally P3.4-build-2: proved the A27 refusal was reached through `validation/gate.py`'s live
+wiring (the A27-before-A25 seam `_terrain_applicability_gate` -> `write_refusal` -> the polymorphic
+`run_pipeline` return contract -> caller-side `dispatch_result`). A39 replaced the refuse-only gate
+with a route-not-refuse router (`_terrain_mode`): incised terrain now reaches a RANKED result, not
+a refusal (`test_wired_seam_ranks_on_incised_fixture`). `write_refusal` was removed as dead code
+(post-review ruling) once terrain shape was its only trigger and stopped calling it; the
+`dispatch_result` "refused" branch and the tests below stay live for any FUTURE non-terrain
+refusal trigger -- they exercise it with hand-built `{"status": "refused", ...}` dicts, since no
+production code currently builds one.
 
 The behavior lock (tests/test_behavior_lock.py) is deliberately NOT extended to assert `status`;
 the Montecito-returns-`ranked` invariant lives HERE (new file) to keep the lock byte-frozen.
@@ -41,12 +38,6 @@ from src.grids import GateAbort
 
 # incised_fire fixture (tests/conftest.py) is picked up automatically by pytest for the tests below.
 
-# The EXACT in-memory refusal-result key set the firewall pins (DECISIONS A27 / build-2 §2.2).
-_REFUSAL_KEYS = {"status", "reason_code", "span_m", "span_threshold_m", "message"}
-# Keys that must NEVER appear in the in-memory refusal-result (absolute-elevation firewall).
-_FORBIDDEN_KEYS = {"p1", "p1_m", "p10", "p10_m", "contour", "contour_m", "CONTOUR_M",
-                   "elevation", "elev", "n_valid", "dem", "dem_raw"}
-
 
 # ============================================================================
 # Wired seam: incised terrain -> ranked-result through the live code path (A39)
@@ -61,20 +52,6 @@ def test_wired_seam_ranks_on_incised_fixture(incised_fire):
     assert result is not None
     assert result["status"] == "ranked"
     assert result["terrain_mode"] == "incised"
-
-
-def test_refusal_result_is_firewall_clean():
-    """Still live for non-terrain refusal triggers (A39 removed only the terrain one)."""
-    from src.outputs import build_refusal_message
-    verdict = {"reason_code": "REFUSED_INCISED_TERRAIN", "span_m": 71.0,
-               "span_threshold_m": 50.0, "n_valid": 1000}
-    msg = build_refusal_message(verdict["reason_code"], verdict["span_m"],
-                                verdict["span_threshold_m"])
-    result = {"status": "refused", "reason_code": verdict["reason_code"],
-              "span_m": verdict["span_m"],
-              "span_threshold_m": verdict["span_threshold_m"], "message": msg}
-    assert set(result) == _REFUSAL_KEYS
-    assert not (_FORBIDDEN_KEYS & set(result))
 
 
 # ============================================================================

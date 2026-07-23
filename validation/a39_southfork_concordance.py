@@ -64,7 +64,7 @@ def concordance(basins_path, segments_path, dem_path) -> dict:
     haz = segments[HAZARD_FIELD].to_numpy(dtype="float64")
     dist_all = segments[HAZARD_FIELD].value_counts(dropna=False).sort_index()   # ordinal-class distribution
     finite = np.isfinite(haz)
-    seg = segments.loc[finite, [HAZARD_FIELD]].copy()
+    seg = segments.loc[finite, [HAZARD_FIELD]].astype({HAZARD_FIELD: "float64"}).copy()
     seg["geometry"] = segments.loc[finite, "geometry"]
     seg = gpd.GeoDataFrame(seg, geometry="geometry", crs=metric_crs).reset_index(drop=True)
     seg["seg_id"] = seg.index

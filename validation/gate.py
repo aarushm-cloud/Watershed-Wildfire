@@ -48,7 +48,9 @@ from src.config import TRUTH_MATCH_M, MASTER_KNOWN_KM2, BURN_LOW_COVERAGE
 # Shared fail-loud exception (main()'s __main__ handler catches it).
 from src.grids import GateAbort
 # write_outputs (+ the SCREENING_STATEMENT A11 framing it emits) -- main() writes the reconstruction
-# artifacts through it. write_refusal/build_refusal_message moved with the A27 gate into src/pipeline.py.
+# artifacts through it. write_refusal is removed (A39 post-review ruling, dead machinery);
+# build_refusal_message stays in src/outputs.py for its one test caller and is imported by neither
+# this module nor src/pipeline.py.
 from src.outputs import write_outputs
 # --- backward-compat shim (behavior-neutral promotion): the pipeline + its I/O anchors now live in
 # src/pipeline.py. Re-export them so existing `gate.X` / `from validation.gate import X` call sites

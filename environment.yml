@@ -43,6 +43,7 @@ dependencies:
   - osmnx==2.1.0           # OSM building footprints via Overpass (acquire.fetch_buildings, CF-C)
   # --- outputs / viz ---
   - folium==0.20.0         # static map (outputs stage) + the frontend basin map (app.py)
+  - matplotlib==3.10.9     # A39 dual-rank map render (outputs.write_dual_rank_map, direct src/ dep)
   # --- frontend (local Streamlit UI; app.py, A36 -- CF-D) ---
   - streamlit==1.59.1      # thin coordinate-entry UI over run_pipeline
   - streamlit-folium==0.27.2  # draw-the-bbox map widget + result map embedding

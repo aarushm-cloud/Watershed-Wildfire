@@ -454,3 +454,112 @@ def test_result_to_view_range_front_not_flagged():
                        "arm_b": {"ranked": [], "basins": []}},
               "headline_arm": "arm_a"}
     assert result_to_view(result)["incised"] is False
+
+
+# ---- A39: incised RENDER -- the exploratory warning + intensity_rank table sort in main() ---------
+
+def test_incised_render_shows_warning_and_sorts_by_intensity():
+    """A39: an incised ranked result renders the exploratory warning and the table sorts ascending
+    by intensity_rank -- the headline order on incised terrain -- not the frozen (area-bearing) rank.
+    Seeds session_state directly (same hermetic pattern as the F8 staleness tests above): no
+    WhiteboxTools, no network."""
+    from streamlit.testing.v1 import AppTest
+    # rank 1/2 deliberately REVERSED vs intensity_rank 2/1, so a sort-by-rank bug would be caught.
+    fc = _fc(_feature("b_lo_intensity", rank=1, rank_b=1), _feature("b_hi_intensity", rank=2, rank_b=2))
+    fc["features"][0]["properties"]["intensity"] = 0.10
+    fc["features"][0]["properties"]["intensity_rank"] = 2
+    fc["features"][1]["properties"]["intensity"] = 0.25
+    fc["features"][1]["properties"]["intensity_rank"] = 1
+
+    at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90)
+    at.session_state["screen"] = {
+        "kind": "ranked", "fc": fc, "n": 2, "incised": True,
+        "csv": b"# EXPLORATORY -- INCISED TERRAIN\nbasin_id,rank\nb_hi_intensity,1\nb_lo_intensity,2\n",
+        "inputs": app.screen_inputs_key(*_APP_DEFAULT_BBOX, None),   # stamped: not stale
+    }
+    at.run()
+
+    assert not at.exception, at.exception
+    assert any("exploratory" in str(w.value).lower() for w in at.warning)
+
+    rows = at.dataframe[0].value   # the table st.dataframe(rows, ...) rendered, as a DataFrame
+    assert "intensity_rank" in rows.columns
+    assert list(rows["intensity_rank"]) == [1, 2]
+    assert list(rows["basin_id"]) == ["b_hi_intensity", "b_lo_intensity"]
+
+
+# ---- A39: the dual-rank map PNG download button (incised runs only) ------------------------------
+
+def _incised_screen(map_png=None):
+    """A seeded incised ranked screen (same hermetic pattern as the render test above)."""
+    fc = _fc(_feature("b1", rank=1, rank_b=1), _feature("b2", rank=2, rank_b=2))
+    for i, f in enumerate(fc["features"]):
+        f["properties"]["intensity"] = 0.25 - 0.1 * i
+        f["properties"]["intensity_rank"] = i + 1
+    screen = {"kind": "ranked", "fc": fc, "n": 2, "incised": True,
+              "csv": b"# EXPLORATORY -- INCISED TERRAIN\nbasin_id,rank\nb1,1\nb2,2\n",
+              "inputs": app.screen_inputs_key(*_APP_DEFAULT_BBOX, None)}
+    if map_png is not None:
+        screen["map_png"] = map_png
+    return screen
+
+
+def test_incised_render_offers_map_download():
+    """An incised screen carrying map_png bytes must render the dual-rank map download button
+    below the CSV one."""
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90)
+    at.session_state["screen"] = _incised_screen(map_png=b"\x89PNG\r\n\x1a\nfake-map-bytes")
+    at.run()
+    assert not at.exception, at.exception
+    labels = [d.label for d in at.get("download_button")]
+    assert any("ranking.csv" in lbl for lbl in labels)
+    assert any("map" in lbl.lower() for lbl in labels), labels
+
+
+def test_non_incised_render_offers_no_map_download():
+    """A non-incised screen (no map_png) keeps the CSV download but must NOT offer a map PNG --
+    the intensity-bearing artifact never travels on accepted-fire output."""
+    from streamlit.testing.v1 import AppTest
+    fc = _fc(_feature("b1", rank=1, rank_b=1))
+    at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90)
+    at.session_state["screen"] = {"kind": "ranked", "fc": fc, "n": 1, "incised": False,
+                                  "csv": b"# ranking\nbasin_id,rank\nb1,1\n",
+                                  "inputs": app.screen_inputs_key(*_APP_DEFAULT_BBOX, None)}
+    at.run()
+    assert not at.exception, at.exception
+    labels = [d.label for d in at.get("download_button")]
+    assert any("ranking.csv" in lbl for lbl in labels)
+    assert not any("map" in lbl.lower() for lbl in labels), labels
+
+
+# ---- map-export review Fix 3(b): the run_screening ATTACH site itself (not a seeded session_state) --
+
+def test_run_screening_incised_attach_writes_real_map(monkeypatch, tmp_path):
+    """Every render test above seeds session_state["screen"] directly and never touches
+    run_screening's attach code (app.py: `map_png = Path(fire["out_dir"]) / DUAL_RANK_MAP_NAME` +
+    the `.exists()` read-back) -- that path had zero coverage. Drives run_screening for real, with
+    acquire.build_fire_config and src.pipeline.run_pipeline monkeypatched to a real-DEM, incised-
+    shaped result (arms built from the same _fake_arm/_write_fake_dem helpers write_dnbr_outputs's
+    own tests use), but leaves write_dnbr_outputs (and therefore write_dual_rank_map) REAL so the
+    attach line reads back an actual file the real writer produced, under the real writer's name."""
+    import acquire
+    from src import pipeline as pl
+    from tests.test_dnbr_outputs import _fake_arm, _write_fake_dem
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    fire = {"name": "attach_test", "out_dir": out_dir, "dem": _write_fake_dem(tmp_path)}
+    monkeypatch.setattr(acquire, "build_fire_config", lambda *a, **k: fire)
+    result = {"status": "ranked", "terrain_mode": "incised", "headline_arm": "arm_a",
+              "arms": {"arm_a": _fake_arm(incised=True), "arm_b": _fake_arm(incised=True)},
+              "creek_nearest": None,
+              "subbasin_meta": {"engine": "whiteboxtools", "wbt_version": "v2.4.0",
+                                "acc_threshold_cells": 3000, "breach_dist_cells": 100}}
+    monkeypatch.setattr(pl, "run_pipeline", lambda fire, **k: result)
+
+    screen = app.run_screening(SFK_BBOX, _FakeUpload())
+
+    assert screen["kind"] == "ranked", screen
+    assert "map_png" in screen, "attach site did not pick up the real writer's map_dual_rank.png"
+    assert screen["map_png"][:4] == b"\x89PNG"

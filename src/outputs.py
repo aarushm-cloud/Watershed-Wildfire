@@ -21,7 +21,6 @@ library's, not this module's). Writes happen only inside write_outputs.
 from __future__ import annotations
 
 import json
-import logging
 
 import numpy as np
 import pandas as pd
@@ -35,7 +34,9 @@ from shapely.ops import unary_union
 SCREENING_STATEMENT = ("Within-fire relative screening ranking of watersheds warranting closer "
                        "assessment -- not a prediction of where debris will go. Not cross-fire comparable.")
 
-_log = logging.getLogger(__name__)
+# A39 dual-rank map filename -- single source of truth so the writer and app.py's attach sites
+# (which re-derive the path independently) cannot drift apart (map-export review Fix 3).
+DUAL_RANK_MAP_NAME = "map_dual_rank.png"
 
 
 def build_refusal_message(reason_code, span_m, span_threshold_m):
@@ -64,44 +65,6 @@ def build_refusal_message(reason_code, span_m, span_threshold_m):
             f"(threshold {span_threshold_m:.0f} m); range-front-over-plain anchoring is well-posed.")
 
 
-def write_refusal(verdict, out_dir):
-    """Write {out_dir}/refusal.json for an A27 terrain-applicability REFUSE (A27 / A27.1).
-
-    Emits an honest, legible refusal instead of a ranking: on incised terrain the scored basins are
-    the upslope catchments of the CONTOUR_M mountain-front anchor that this terrain does not define,
-    so there are no basins and no scores to caveat. ranking.csv / basins.geojson are NOT written on
-    REFUSE (the caller does not call write_outputs; gate wiring is build-2). Does not crash.
-
-    verdict  -- the detector dict from delineate.assess_hypsometric_applicability:
-                {refuse, reason_code, span_m, span_threshold_m, n_valid}.
-    out_dir  -- output directory path (Path-like, gate-owned), same convention as write_outputs.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    message = build_refusal_message(verdict["reason_code"], verdict["span_m"],
-                                    verdict["span_threshold_m"])
-    payload = {
-        "status": "REFUSED",
-        "reason_code": verdict["reason_code"],
-        "trigger": "hypsometric_span",
-        "span_m": verdict["span_m"],
-        "span_threshold_m": verdict["span_threshold_m"],
-        "n_valid": verdict["n_valid"],
-        "message": message,
-        "screening": SCREENING_STATEMENT,
-        "ranking_produced": False,
-        "explanation": ("No within-fire ranking is produced: the scored basins are the upslope "
-                        "catchments of CONTOUR_M-anchored canyon-mouth outlets, an anchor incised "
-                        "terrain does not define. No anchor, no basins, no scores to caveat "
-                        "(DECISIONS A27 / A27.1)."),
-    }
-    refusal_path = out_dir / "refusal.json"
-    with open(refusal_path, "w") as fh:
-        json.dump(payload, fh, indent=2)
-    _log.info("A27 refusal written: %s (reason_code=%s, span_m=%.4f m, threshold=%.1f m)",
-              refusal_path, verdict["reason_code"], verdict["span_m"], verdict["span_threshold_m"])
-    return refusal_path
-
-
 def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source,
                   validation_case="Thomas_Fire_2017/Montecito_2018"):
     """Write {out_dir}/{ranking.csv, basins.geojson}, stamped burn_source + screening (A4/A11).
@@ -117,6 +80,10 @@ def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source,
                          "produced none; an empty ranking is indistinguishable from a broken run "
                          "(A8 fail-loud).")
     out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "refusal.json").unlink(missing_ok=True)  # purge superseded-run debris (owner ruling)
+    (out_dir / DUAL_RANK_MAP_NAME).unlink(missing_ok=True)  # ditto: a stale incised-run map must
+    # not survive an accepted (SBS) re-run into the same out_dir -- intensity must NEVER appear on
+    # accepted-fire output (map-export review Fix 1).
     nearest_by_basin = {}
     for creek, info in creek_nearest.items():
         bid = info["basin_id"]
@@ -225,6 +192,10 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
                          "delineation produced none; an empty ranking is indistinguishable from a "
                          "broken run (A8 fail-loud).")
     out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "refusal.json").unlink(missing_ok=True)  # purge superseded-run debris (owner ruling)
+    (out_dir / DUAL_RANK_MAP_NAME).unlink(missing_ok=True)  # ditto: a stale incised-run map must
+    # not survive an accepted (incised=False) re-run into the same out_dir -- intensity must NEVER
+    # appear on accepted-fire output (map-export review Fix 1); regenerated fresh below if incised.
     b_by = {b["basin_id"]: b for b in arm_b["basins"]}
 
     nearest_by_basin = {}
@@ -255,8 +226,8 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
             "nearest_outlet_dist_m": round(near[1], 1) if near[1] is not None else "",
         }
         if incised:   # A39: appended LAST -- pandas headers follow dict insertion order
-            row["intensity"] = a.get("intensity")
-            row["intensity_rank"] = a.get("intensity_rank")
+            row["intensity"] = round(a.get("intensity"), 6)   # score-family precision (score/score_b)
+            row["intensity_rank"] = int(a.get("intensity_rank"))
         rows.append(row)
     if incised:   # A39: intensity is the headline ordering on incised terrain, not the frozen rank
         rows.sort(key=lambda r: r["intensity_rank"])
@@ -296,8 +267,8 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
                       "flowed": a.get("flowed", False), "matched_creek": a.get("matched_creek", ""),
                       "burn_source": "dNBR", "screening": SCREENING_STATEMENT}
         if incised:
-            feat_props["intensity"] = a.get("intensity")
-            feat_props["intensity_rank"] = a.get("intensity_rank")
+            feat_props["intensity"] = round(a.get("intensity"), 6)   # score-family precision (score/score_b)
+            feat_props["intensity_rank"] = int(a.get("intensity_rank"))
         props.append(feat_props)
     gdf = gpd.GeoDataFrame(props, geometry=geoms, crs=dem_crs).to_crs("EPSG:4326")
     gj_path = out_dir / "basins.geojson"
@@ -318,4 +289,77 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
     fc["provenance"] = provenance
     with open(gj_path, "w") as fh:
         json.dump(fc, fh)
+    if incised:   # A39 product artifact: the dual-rank map travels ONLY on incised output
+        write_dual_rank_map(gj_path, dem_tif, out_dir / DUAL_RANK_MAP_NAME, validation_case)
     return csv_path, gj_path
+
+
+def write_dual_rank_map(gj_path, dem_path, out_png, fire_label, top_n=8):
+    """Static dual-rank PNG for the incised (A39) path: two panels over a grey DEM hillshade --
+    LEFT the frozen score rank (SIZE, burn x slope x area), RIGHT the intensity rank
+    (burn x slope, the incised headline). Rank 1 renders brightest; the top-{top_n} basins of
+    each panel get numbered circular badges at their representative points.
+
+    Reads the just-written basins.geojson back (rank / intensity_rank feature properties) and
+    reprojects it to the DEM CRS so both layers draw in metric coordinates (A25: the per-fire
+    CRS comes off the DEM handle). Carries the EXPLORATORY framing: suptitle + a footer with the
+    first sentence of INCISED_FRAMING verbatim -- never wording that implies validation or
+    prediction. Deterministic (no timestamps). Agg backend, function-local matplotlib import so
+    module load stays light; the figure is closed before return. Returns out_png."""
+    import matplotlib
+    matplotlib.use("Agg")   # headless render; never a GUI backend
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LightSource
+
+    with rasterio.open(dem_path) as s:
+        dem = s.read(1).astype("float64")
+        if s.nodata is not None:
+            dem[dem == s.nodata] = np.nan
+        extent = (s.bounds.left, s.bounds.right, s.bounds.bottom, s.bounds.top)
+        dem_crs = s.crs
+        dx, dy = abs(s.transform.a), abs(s.transform.e)   # cell size (m) for the vert_exag math
+    valid = np.isfinite(dem)
+    # flat-fill nodata so the gradient (and matplotlib's contrast stretch) stays NaN-free,
+    # then blank those cells back out -- nodata renders empty, never as fake terrain
+    hs = LightSource(azdeg=315, altdeg=45).hillshade(
+        np.where(valid, dem, np.nanmin(dem) if valid.any() else 0.0), vert_exag=1.0, dx=dx, dy=dy)
+    hs = np.where(valid, hs, np.nan)
+
+    gdf = gpd.read_file(gj_path).to_crs(dem_crs)   # writer stored EPSG:4326; draw metric
+    n = len(gdf)
+    # size the figure from the DEM aspect (panels draw with equal metric aspect) so tall or wide
+    # extents don't leave dead whitespace; clamped so a degenerate extent can't blow the canvas
+    panel_h = min(max(8.0 * (extent[3] - extent[2]) / (extent[1] - extent[0]), 3.0), 10.0)
+    fig, axes = plt.subplots(1, 2, figsize=(16, panel_h + 1.6), sharex=True, sharey=True)
+    try:   # figure-leak guard: any exception below must still close fig (pyplot's global manager
+        # holds it open for the life of this long-running Streamlit process otherwise)
+        panels = (("rank", "SIZE rank (burn·slope·area)", "magma"),
+                  ("intensity_rank", "INTENSITY rank (burn·slope)", "viridis"))
+        for ax, (col, title, cmap_name) in zip(axes, panels):
+            ax.imshow(hs, cmap="gray", extent=extent)
+            cmap = plt.get_cmap(cmap_name)
+            # rank 1 = brightest end of the colormap; last rank = darkest
+            colors = [cmap(1.0 - (r - 1) / max(n - 1, 1)) for r in gdf[col]]
+            gdf.plot(ax=ax, color=colors, alpha=0.55, edgecolor="black", linewidth=0.4)
+            for _, row in gdf[gdf[col] <= top_n].iterrows():
+                pt = row.geometry.representative_point()
+                ax.text(pt.x, pt.y, str(int(row[col])), ha="center", va="center", fontsize=9,
+                        fontweight="bold", color="black", zorder=5,
+                        bbox=dict(boxstyle="circle,pad=0.25", fc="white", ec="black", alpha=0.9))
+            ax.set_title(title)
+            ax.set_xlabel("Easting (m)")
+        axes[0].set_ylabel("Northing (m)")
+        fig.suptitle(f"{fire_label} — EXPLORATORY (incised terrain, A39) | {n} sub-basins",
+                     fontsize=14)
+        # degradation contract: split on the sentence boundary ". " (not the first raw "."), so a
+        # future rewording with a mid-sentence decimal (e.g. "0.25") can't truncate the footer
+        # mid-clause; a rewording with no ". " at all falls back to the FULL string rather than
+        # raising (a ValueError here would otherwise propagate as a bare "substring not found").
+        parts = INCISED_FRAMING.split(". ", 1)
+        first_sentence = parts[0] + "." if len(parts) > 1 else INCISED_FRAMING
+        fig.text(0.5, 0.01, f"{first_sentence} Full framing: ranking.csv header.",
+                 ha="center", fontsize=8, style="italic")
+        fig.savefig(out_png, dpi=150, bbox_inches="tight")
+    finally:
+        plt.close(fig)
+    return out_png

@@ -108,5 +108,36 @@ def test_output_gdf_uses_per_fire_crs(tmp_path, monkeypatch, epsg, x0, y0):
     )
 
 
+def test_write_outputs_purges_stale_refusal_json(tmp_path):
+    """Owner ruling (out_dir staleness hygiene): the SBS-path writer must not leave a stale
+    refusal.json from a superseded run sitting alongside a fresh ranking.csv/basins.geojson.
+    Reuses this file's minimal DEM/basin fixtures -- the cheapest hermetic write_outputs call in
+    the suite -- rather than building new scaffolding; the dNBR-writer twin of this test lives in
+    tests/test_dnbr_outputs.py."""
+    dem_tif = tmp_path / "dem.tif"
+    _write_synthetic_dem(dem_tif, 32611, 250000.0, 3810000.0)
+    stale = tmp_path / "refusal.json"
+    stale.write_text('{"status": "REFUSED"}')
+
+    outputs.write_outputs(_minimal_basins(), {}, tmp_path, dem_tif, "SBS")
+
+    assert not stale.exists()
+
+
+def test_write_outputs_purges_stale_dual_rank_map(tmp_path):
+    """map-export review Fix 1 (SBS-writer twin of the dNBR-writer test in test_dnbr_outputs.py):
+    an accepted (SBS) write into a persistent out_dir must purge a stale map_dual_rank.png left
+    behind by an earlier incised run -- intensity must NEVER appear on accepted-fire output (A39).
+    Reuses this file's minimal DEM/basin fixtures, same as the refusal-purge test above."""
+    dem_tif = tmp_path / "dem.tif"
+    _write_synthetic_dem(dem_tif, 32611, 250000.0, 3810000.0)
+    stale = tmp_path / outputs.DUAL_RANK_MAP_NAME
+    stale.write_bytes(b"\x89PNG\r\n\x1a\nfake-stale-map")
+
+    outputs.write_outputs(_minimal_basins(), {}, tmp_path, dem_tif, "SBS")
+
+    assert not stale.exists()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

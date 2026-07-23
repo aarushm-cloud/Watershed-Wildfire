@@ -1,7 +1,7 @@
 """A31 REORDER + South Fork wiring tests.
 
-A31 moves the A27 terrain-applicability gate AHEAD of stage_2a_hydrology in run_pipeline, so a fire
-refuses on the raw DEM ALONE -- before any SBS is opened or hydrology runs. This file locks the three
+A31 moves the terrain-classification router AHEAD of stage_2a_hydrology in run_pipeline, so a fire
+is classified on the raw DEM ALONE -- before any SBS is opened or hydrology runs. This file locks
 DISTINCT outcomes of the input-shape matrix (do not conflate them):
 
   1. INCISED-RANKS (incised DEM, sbs=None) -> run_pipeline ROUTES (A39) to a ranked-result, WITHOUT
@@ -11,6 +11,8 @@ DISTINCT outcomes of the input-shape matrix (do not conflate them):
                                           (test_bad_dem_path_raises_not_systemexit)
   3. DATA-ABSENT (driver layer)        -> run.run_fire / _assert_inputs_present exits with a clean
                                           SystemExit naming the missing input. (test_clean_exit_*)
+  4. ORDERING PROOF (sentinel)         -> classification + its guards fire BEFORE hydrology is ever
+                                          reached, non-vacuously (see the two-test proof below).
 
 test_behavior_lock.py (the oracle) and test_B_southfork_corroboration are deliberately NOT touched.
 
@@ -115,6 +117,50 @@ def test_none_input_paths_are_skipped(tmp_path):
     fire = {"name": "none_ok", "dem": dem, "sbs": None, "assets": None, "creeks": None,
             "out_dir": tmp_path, "expected_crs": "EPSG:32613", "validation_case": "x"}
     run._assert_inputs_present(fire)   # must NOT raise: sbs/assets/creeks are None (absent by design)
+
+
+# ============================================================================
+# 4. ORDERING PROOF -- non-vacuous lock that classification (and its guards) run BEFORE hydrology.
+#    Restores what Task 11's retarget weakened to "terrain_mode present" (proves classification ran,
+#    not that it ran FIRST). stage_2a_hydrology is a same-module function in src/pipeline.py (not
+#    imported from elsewhere), so patching the name on the src.pipeline module object intercepts
+#    run_pipeline's own bare-name call to it.
+# ============================================================================
+def test_incised_sbs_guard_fires_before_hydrology_sentinel(monkeypatch, incised_fire):
+    """Revert-detection: if a future change moved hydrology ahead of the terrain router / the
+    incised+SBS guard, this test would fail with the sentinel RuntimeError instead of the expected
+    GateAbort -- that reordering is exactly what this pins against. Non-vacuity is proven by the
+    patch-effectiveness twin below (same sentinel, hydrology IS reached on the normal path)."""
+    from src.grids import GateAbort
+    import src.pipeline as pl
+
+    def _sentinel(*a, **k):
+        raise RuntimeError("SENTINEL: hydrology ran")
+
+    monkeypatch.setattr(pl, "stage_2a_hydrology", _sentinel)
+
+    fire = dict(incised_fire)
+    fire["dnbr"] = None
+    fire["sbs"] = "data/southfork/burn/arm_a_cls.tif"   # any real path -- never opened before the abort
+
+    with pytest.raises(GateAbort, match="incised"):
+        pl.run_pipeline(fire)
+
+
+def test_hydrology_sentinel_actually_intercepts_on_the_normal_incised_path(monkeypatch, incised_fire):
+    """Patch-effectiveness proof: the SAME sentinel, on the plain incised_fire fixture (valid dnbr,
+    no sbs), must raise the sentinel itself -- hydrology IS reached on the normal path. Without this,
+    the guard test above could pass vacuously (e.g. a mis-targeted patch that never intercepts
+    anything, or a GateAbort raised for an unrelated reason)."""
+    import src.pipeline as pl
+
+    def _sentinel(*a, **k):
+        raise RuntimeError("SENTINEL: hydrology ran")
+
+    monkeypatch.setattr(pl, "stage_2a_hydrology", _sentinel)
+
+    with pytest.raises(RuntimeError, match="SENTINEL: hydrology ran"):
+        pl.run_pipeline(incised_fire)
 
 
 if __name__ == "__main__":

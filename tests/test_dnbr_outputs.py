@@ -204,3 +204,48 @@ def test_incised_stamps_engine_provenance(tmp_path):
     assert prov["basin_engine"] == "whiteboxtools"
     assert prov["wbt_version"] == "v2.4.0"
     assert prov["acc_threshold_cells"] == 3000
+
+
+def test_write_dnbr_outputs_purges_stale_refusal_json(tmp_path):
+    """Owner ruling (out_dir staleness hygiene): a fresh ranked write must not leave a stale
+    refusal.json from a superseded run sitting alongside the new ranking.csv/basins.geojson --
+    Task 14 had to hand-delete South Fork's stale one; this makes the writer do it."""
+    from src.outputs import write_dnbr_outputs
+    stale = tmp_path / "refusal.json"
+    stale.write_text('{"status": "REFUSED"}')
+
+    write_dnbr_outputs(_fake_arm(), _fake_arm(), None, tmp_path,
+                       _write_fake_dem(tmp_path), "purge_test")
+
+    assert not stale.exists()
+
+
+# ---- Dual-rank map PNG (owner-requested product artifact; incised-gated) ------------------------
+
+def test_incised_write_produces_dual_rank_map_png(tmp_path):
+    """A39 dual-rank map: an incised write must also land map_dual_rank.png (SIZE rank panel +
+    INTENSITY rank panel over a hillshade) -- a real PNG, not a stub."""
+    from src.outputs import write_dnbr_outputs
+    write_dnbr_outputs(_fake_arm(), _fake_arm(), None, tmp_path,
+                       _write_fake_dem(tmp_path), "incised_test", incised=True)
+    png = tmp_path / "map_dual_rank.png"
+    assert png.exists(), "incised write must produce map_dual_rank.png"
+    data = png.read_bytes()
+    assert data[:4] == b"\x89PNG"
+    assert len(data) > 5000, "a rendered two-panel figure, not a stub"
+
+
+def test_accepted_write_produces_no_dual_rank_map(tmp_path):
+    """Incised-gated: intensity must NEVER appear on accepted-fire output -- so the intensity-
+    bearing map file must not exist after an accepted (incised=False) write. Pre-seeds a STALE
+    map_dual_rank.png (mirroring the neighboring refusal-purge test, test_write_dnbr_outputs_purges_
+    stale_refusal_json above) so this proves the writer REMOVES superseded-run debris left by an
+    earlier incised run into the same persistent out_dir -- not merely that it never creates the
+    file itself (map-export review Fix 1: a live-reproduced gap, the writer purged refusal.json
+    unconditionally but never map_dual_rank.png)."""
+    from src.outputs import write_dnbr_outputs, DUAL_RANK_MAP_NAME
+    stale = tmp_path / DUAL_RANK_MAP_NAME
+    stale.write_bytes(b"\x89PNG\r\n\x1a\nfake-stale-map")
+    write_dnbr_outputs(_fake_arm(incised=False), _fake_arm(incised=False), None, tmp_path,
+                       _write_fake_dem(tmp_path), "accepted_test")
+    assert not (tmp_path / DUAL_RANK_MAP_NAME).exists()
