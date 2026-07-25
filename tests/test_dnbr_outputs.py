@@ -182,15 +182,15 @@ def test_incised_appends_intensity_and_stamps_disclaimer(tmp_path):
     assert "EXPLORATORY" in INCISED_FRAMING
 
 
-def test_incised_rows_are_ordered_by_intensity(tmp_path):
-    """A39: intensity is the HEADLINE ordering -- a practitioner reading top-down must
-    read it, not the frozen score order."""
+def test_incised_rows_are_ordered_by_frozen_rank(tmp_path):
+    """A40: incised rows are ordered by the frozen `rank` (the headline, same as range-front) -- NOT by
+    intensity_rank. intensity/intensity_rank remain as companion columns. The fixture decouples the two
+    orderings (rank = n-i, intensity_rank = i+1), so a stray intensity sort would fail this."""
     from src.outputs import write_dnbr_outputs
     csv_path, _ = write_dnbr_outputs(_fake_arm(), _fake_arm(), None, tmp_path,
                                      _write_fake_dem(tmp_path), "incised_test", incised=True)
     _, rows = _read_rows(csv_path)
-    assert [int(r["intensity_rank"]) for r in rows] == sorted(
-        int(r["intensity_rank"]) for r in rows)
+    assert [int(r["rank"]) for r in rows] == sorted(int(r["rank"]) for r in rows)
 
 
 def test_incised_stamps_engine_provenance(tmp_path):

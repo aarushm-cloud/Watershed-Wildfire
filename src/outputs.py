@@ -160,12 +160,13 @@ INCISED_FRAMING = (
     "which fan is threatened. Within-fire ordinal only -- never compare across fires. "
     "UNVALIDATED ON THIS TERRAIN CLASS: the method's outcome evidence comes from one "
     "range-front fire (Montecito, effective n=6 flow events), not from incised terrain. "
-    "Rows are ordered by `intensity` (mean_burn x mean_slope), which is independent of "
-    "basin size; the `score` column retains the frozen burn x slope x area formula but its "
-    "area term depends on the segmentation threshold here. KNOWN OPEN LIMITATION: where "
-    "dissected terrain is uniformly steep, mean_slope may not discriminate between basins, "
-    "in which case this ordering approaches a burn-severity ranking. For an authoritative "
-    "assessment consult USGS or your state geological survey."
+    "Rows are ranked by the frozen `score` (burn x slope x area), as on range-front fires. An "
+    "`intensity` companion column (mean_burn x mean_slope, area-independent) is shown because the "
+    "score's area term depends on the segmentation threshold here -- and intensity scored HIGHER than "
+    "score on the one (range-front) validation case, so treat BOTH as exploratory. KNOWN OPEN "
+    "LIMITATION: where dissected terrain is uniformly steep, mean_slope may not discriminate between "
+    "basins, in which case the `intensity` companion approaches a burn-severity ranking. For an "
+    "authoritative assessment consult USGS or your state geological survey."
 )
 
 
@@ -183,8 +184,8 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
     stamp a real fire "Montecito"). creek_nearest -- per-creek nearest-outlet info, or None (a real fire
     with no truth-creek layer).
     out_dir -- output dir; dem_tif -- DEM path for the GeoJSON transform/CRS re-open (A25).
-    incised -- A39 sub-basin path: appends intensity/intensity_rank, orders rows by intensity_rank,
-    stamps INCISED_FRAMING, adds engine provenance. Default False is byte-identical to pre-A39 output.
+    incised -- A39/A40 sub-basin path: appends intensity/intensity_rank as companion columns (rows stay
+    in frozen `rank` order), stamps INCISED_FRAMING, adds engine provenance. Default False byte-identical.
     subbasin_meta -- WhiteboxTools engine metadata (engine/wbt_version/acc_threshold_cells/
     breach_dist_cells), stamped into GeoJSON provenance when incised."""
     if not arm_a["basins"]:                            # F9: never emit an empty artifact (A8 fail-loud)
@@ -229,8 +230,8 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
             row["intensity"] = round(a.get("intensity"), 6)   # score-family precision (score/score_b)
             row["intensity_rank"] = int(a.get("intensity_rank"))
         rows.append(row)
-    if incised:   # A39: intensity is the headline ordering on incised terrain, not the frozen rank
-        rows.sort(key=lambda r: r["intensity_rank"])
+    # A40: incised rows stay in the frozen `rank` order from the loop above (headline = score, same as
+    # range-front); intensity/intensity_rank ride along as companion columns, no re-sort.
     df = pd.DataFrame(rows)
     csv_path = out_dir / "ranking.csv"
     with open(csv_path, "w") as fh:
@@ -296,8 +297,9 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
 
 def write_dual_rank_map(gj_path, dem_path, out_png, fire_label, top_n=8):
     """Static dual-rank PNG for the incised (A39) path: two panels over a grey DEM hillshade --
-    LEFT the frozen score rank (SIZE, burn x slope x area), RIGHT the intensity rank
-    (burn x slope, the incised headline). Rank 1 renders brightest; the top-{top_n} basins of
+    LEFT the frozen score rank (SIZE, burn x slope x area) -- the headline, as on range-front --
+    RIGHT the intensity rank (burn x slope, the area-independent companion; A40). Rank 1 renders
+    brightest; the top-{top_n} basins of
     each panel get numbered circular badges at their representative points.
 
     Reads the just-written basins.geojson back (rank / intensity_rank feature properties) and

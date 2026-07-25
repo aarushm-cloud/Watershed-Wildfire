@@ -123,6 +123,63 @@ def test_basin_rows_surfaces_frozen_formula_terms_in_product_order():
     assert keys.index("mean_burn") < keys.index("mean_slope") < keys.index("area_km2") < keys.index("score")
 
 
+# ---- rank-uncertain threshold scales with basin count (Q2) -------------------------------------
+
+def test_uncertain_threshold_floor_holds_for_small_fires():
+    # Montecito-scale fires keep the validated fixed cutoff of 3: round(0.06*n) < 3 for n <= ~50, so
+    # the floor wins and small-fire behavior is byte-identical to the old fixed RANK_UNCERTAIN_DELTA.
+    assert app._uncertain_threshold(2) == 3
+    assert app._uncertain_threshold(32) == 3      # Montecito
+    assert app._uncertain_threshold(50) == 3
+
+
+def test_uncertain_threshold_scales_for_large_fires():
+    # On big fires the fixed |delta|>=3 cutoff saturates (A/B rank displacement grows ~linearly with n),
+    # so the threshold scales as round(0.06*n) once that exceeds the floor.
+    assert app._uncertain_threshold(100) == 6
+    assert app._uncertain_threshold(250) == 15
+
+
+def test_basin_rows_uncertainty_threshold_scales_with_basin_count():
+    # At n=250 the threshold is 15: an 8-position A/B disagreement is NOT flagged, a 30-position one is.
+    n = 250
+    feats = []
+    for i in range(1, n + 1):
+        if i == 10:
+            feats.append(_feature(f"b{i}", rank=i, rank_b=i + 8))    # delta 8  -> certain at n=250
+        elif i == 20:
+            feats.append(_feature(f"b{i}", rank=i, rank_b=i + 30))   # delta 30 -> uncertain
+        else:
+            feats.append(_feature(f"b{i}", rank=i, rank_b=i))        # delta 0 (agree)
+    rows = {r["basin_id"]: r for r in basin_rows(_fc(*feats))}
+    assert rows["b10"]["rank_delta"] == 8 and rows["b10"]["uncertain"] is False
+    assert rows["b20"]["rank_delta"] == 30 and rows["b20"]["uncertain"] is True
+
+
+# ---- basin lookup: markers + jump-to (Q1) ------------------------------------------------------
+
+def test_basin_centroid_is_inside_the_polygon():
+    feat = _feature("b1", rank=1, rank_b=1)          # 0.01-deg square: lon [-105.69,-105.68], lat [33.35,33.36]
+    lat, lon = app._basin_centroid(feat)
+    assert 33.35 <= lat <= 33.36
+    assert -105.69 <= lon <= -105.68
+
+
+def test_top_k_markers_selects_highest_priority_basins():
+    fc = _fc(_feature("b1", rank=1, rank_b=1), _feature("b2", rank=2, rank_b=2),
+             _feature("b3", rank=3, rank_b=3))
+    marks = app._top_k_markers(fc, 2)
+    assert [rank for rank, _latlon in marks] == [1, 2]        # only the top 2, in rank order
+    assert all(len(latlon) == 2 for _rank, latlon in marks)  # each carries [lat, lon]
+
+
+def test_build_basin_map_accepts_focus_and_top_k_without_error():
+    fc = _fc(_feature("b1", rank=1, rank_b=1), _feature("b2", rank=2, rank_b=4),
+             _feature("b3", rank=3, rank_b=3))
+    m = build_basin_map(fc, top_k=2, focus_basin_id="b2")
+    assert isinstance(m, folium.Map)
+
+
 # ---- build_basin_map (smoke) -------------------------------------------------------------------
 
 def test_build_basin_map_returns_a_folium_map():
@@ -458,13 +515,13 @@ def test_result_to_view_range_front_not_flagged():
 
 # ---- A39: incised RENDER -- the exploratory warning + intensity_rank table sort in main() ---------
 
-def test_incised_render_shows_warning_and_sorts_by_intensity():
-    """A39: an incised ranked result renders the exploratory warning and the table sorts ascending
-    by intensity_rank -- the headline order on incised terrain -- not the frozen (area-bearing) rank.
-    Seeds session_state directly (same hermetic pattern as the F8 staleness tests above): no
-    WhiteboxTools, no network."""
+def test_incised_render_shows_warning_and_sorts_by_frozen_rank():
+    """A40: an incised ranked result renders the exploratory warning and the table sorts by the frozen
+    `rank` (the headline, same as range-front) -- NOT by intensity_rank; intensity_rank stays as a
+    companion column. Seeds session_state directly (hermetic, same pattern as the F8 staleness tests
+    above): no WhiteboxTools, no network."""
     from streamlit.testing.v1 import AppTest
-    # rank 1/2 deliberately REVERSED vs intensity_rank 2/1, so a sort-by-rank bug would be caught.
+    # rank 1/2 deliberately REVERSED vs intensity_rank 2/1, so a stray sort-by-intensity would be caught.
     fc = _fc(_feature("b_lo_intensity", rank=1, rank_b=1), _feature("b_hi_intensity", rank=2, rank_b=2))
     fc["features"][0]["properties"]["intensity"] = 0.10
     fc["features"][0]["properties"]["intensity_rank"] = 2
@@ -483,9 +540,9 @@ def test_incised_render_shows_warning_and_sorts_by_intensity():
     assert any("exploratory" in str(w.value).lower() for w in at.warning)
 
     rows = at.dataframe[0].value   # the table st.dataframe(rows, ...) rendered, as a DataFrame
-    assert "intensity_rank" in rows.columns
-    assert list(rows["intensity_rank"]) == [1, 2]
-    assert list(rows["basin_id"]) == ["b_hi_intensity", "b_lo_intensity"]
+    assert "intensity_rank" in rows.columns                                  # companion column still present
+    assert list(rows["basin_id"]) == ["b_lo_intensity", "b_hi_intensity"]   # frozen rank order (1, 2)
+    assert list(rows["intensity_rank"]) == [2, 1]                           # NOT the sort key anymore
 
 
 # ---- A39: the dual-rank map PNG download button (incised runs only) ------------------------------

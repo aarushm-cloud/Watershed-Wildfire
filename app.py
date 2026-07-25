@@ -35,9 +35,12 @@ if str(_REPO_ROOT) not in sys.path:
 from src.grids import GateAbort
 from src.outputs import SCREENING_STATEMENT, DUAL_RANK_MAP_NAME
 
-# |rankA - rankB| at/above which a basin is flagged "rank uncertain" (display heuristic, Tier-2, not
-# a science value): the honest surfacing of Arm A / Arm B disagreement (A34 rank_delta).
+# |rankA - rankB| at/above which a basin is flagged "rank uncertain" (display heuristic, Tier-2, not a
+# science value): the honest surfacing of Arm A / Arm B disagreement (A34 rank_delta). The cutoff scales
+# max(DELTA, round(FRAC * n)) -- a fixed 3 saturates on 250+-basin fires; the floor keeps Montecito-scale
+# (<= ~50-basin) fires at the validated fixed cutoff. See _uncertain_threshold.
 RANK_UNCERTAIN_DELTA = 3
+RANK_UNCERTAIN_FRAC = 0.06
 
 # Decimal places for BOTH the bbox number_input display AND the F8 staleness key -- one constant so they
 # cannot drift apart (a key finer than the display flags stale after a visually no-op edit). 5 dp ~= 1 m
@@ -83,13 +86,22 @@ def result_to_view(result: dict) -> dict:
     return {"kind": "unknown", "message": f"Unexpected pipeline result status: {status!r}."}
 
 
+def _uncertain_threshold(n_basins: int, *, floor: int = RANK_UNCERTAIN_DELTA,
+                         frac: float = RANK_UNCERTAIN_FRAC) -> int:
+    """|rankA-rankB| at/above which a basin is flagged rank-uncertain: max(floor, round(frac*n)).
+    Floor keeps small fires at the validated cutoff; the fraction stops saturation on large fires."""
+    return max(floor, round(frac * n_basins))
+
+
 def basin_rows(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA) -> list:
     """basins.geojson -> display rows sorted by the Arm A headline rank. Columns are ordered so the
     frozen score reads left-to-right as its own inputs -- mean_burn x mean_slope x area_km2 -> score
     -- making the ranking auditable. Burn is the Arm A binned value (the term the headline score uses);
     slope + area are identical across arms. Carries the rank_delta 'uncertain' flag (A34)."""
+    features = fc.get("features", [])
+    threshold = _uncertain_threshold(len(features), floor=uncertain_delta)
     rows = []
-    for feat in fc.get("features", []):
+    for feat in features:
         p = feat.get("properties", {})
         delta = p.get("rank_delta", abs((p.get("rank") or 0) - (p.get("rank_b") or 0)))
         row = {"basin_id": p.get("basin_id"), "rank": p.get("rank"),
@@ -97,7 +109,7 @@ def basin_rows(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA) -> list
                "mean_slope": p.get("mean_slope"), "area_km2": p.get("area_km2"),
                "score": p.get("score"),
                "rank_b": p.get("rank_b"), "score_b": p.get("score_b"),
-               "rank_delta": delta, "uncertain": delta >= uncertain_delta}
+               "rank_delta": delta, "uncertain": delta >= threshold}
         if "intensity" in p:   # A39: only present on incised (WhiteboxTools sub-basin) features
             row["intensity"] = p["intensity"]
             row["intensity_rank"] = p["intensity_rank"]
@@ -364,9 +376,30 @@ def run_generated_screening(bbox_raw, pair, *, name="frontend", contour_m=150.0)
             shutil.rmtree(out_dir, ignore_errors=True)
 
 
-def build_basin_map(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA) -> folium.Map:
+def _basin_centroid(feat: dict):
+    """A representative interior point [lat, lon] (folium order) for a basin polygon -- for numbered
+    markers and zoom-to. representative_point stays inside concave/multipart shapes (a bounds center may not)."""
+    from shapely.geometry import shape
+    pt = shape(feat["geometry"]).representative_point()
+    return [pt.y, pt.x]
+
+
+def _top_k_markers(fc: dict, k: int) -> list:
+    """[(rank, [lat, lon]), ...] for the k highest-priority basins, in rank order -- the basins that get
+    a numbered map marker so the top of the ranking is findable at a glance on a large fire."""
+    marked = []
+    for feat in fc.get("features", []):
+        rank = feat.get("properties", {}).get("rank")
+        if rank is not None and rank <= k:
+            marked.append((rank, _basin_centroid(feat)))
+    return sorted(marked, key=lambda rc: rc[0])
+
+
+def build_basin_map(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA,
+                    top_k: int = 10, focus_basin_id=None) -> folium.Map:
     """A folium map of the ranked basins: fill by Arm A rank (hot=priority); a blue dashed outline
-    flags basins where Arm A / Arm B disagree (rank-uncertain, A34)."""
+    flags basins where Arm A / Arm B disagree (rank-uncertain, A34). The top_k highest-priority basins
+    carry a numbered marker (findable at a glance on a large fire); focus_basin_id zooms to one basin."""
     rows = {r["basin_id"]: r for r in basin_rows(fc, uncertain_delta=uncertain_delta)}
     n = max(len(rows), 1)
     m = folium.Map(location=_fc_center(fc), zoom_start=12, tiles="OpenStreetMap")
@@ -386,8 +419,29 @@ def build_basin_map(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA) ->
             aliases=["Basin", "Rank (Arm A)", "Score", "Rank (Arm B)", "Rank Δ"]),
     )
     gj.add_to(m)
+
+    for rank, latlon in _top_k_markers(fc, top_k):
+        folium.Marker(
+            latlon,
+            icon=folium.DivIcon(
+                icon_size=(20, 20), icon_anchor=(10, 10),
+                html=(f'<div style="font:bold 12px sans-serif;color:#fff;background:#d7302b;'
+                      f'border-radius:50%;width:20px;height:20px;line-height:20px;text-align:center;'
+                      f'border:1px solid #fff">{rank}</div>')),
+        ).add_to(m)
+
+    focus_bounds = None
+    if focus_basin_id is not None:
+        for feat in fc.get("features", []):
+            if feat.get("properties", {}).get("basin_id") == focus_basin_id:
+                pts = list(_iter_coords(feat.get("geometry", {}).get("coordinates", [])))
+                if pts:
+                    xs = [x for x, _y in pts]
+                    ys = [y for _x, y in pts]
+                    focus_bounds = [[min(ys), min(xs)], [max(ys), max(xs)]]
+                break
     try:
-        bounds = gj.get_bounds()
+        bounds = focus_bounds if focus_bounds is not None else gj.get_bounds()
         if bounds and bounds[0][0] is not None:
             m.fit_bounds(bounds)
     except Exception:
@@ -672,12 +726,26 @@ def main():
             "catchments; individual boundaries may be approximate. Read it as relative "
             "**source susceptibility** for triage — it does not indicate runout, deposition, "
             "or which fan is threatened. The method has **not been validated on this terrain "
-            "class**. Rows are ordered by **intensity** (burn × slope), which does not depend "
-            "on basin size."
+            "class**. Rows are ranked by the frozen **score** (as on range-front fires); an "
+            "**intensity** companion (burn × slope, area-independent) rides alongside because the "
+            "score's area term is a segmentation artifact here -- and intensity scored higher on the "
+            "one validation case, so treat both as exploratory."
         )
     st.success(f"Ranked {screen['n']} basins — Arm A (binned) is the headline; "
                f"Arm B (continuous) rides alongside.")
-    st_folium(build_basin_map(fc), height=520, use_container_width=True, key="result_map")
+    # Basin lookup: the top basin is hard to find by eye on a large fire. The top-K basins carry numbered
+    # markers (build_basin_map), and this control zooms the map to any rank on demand.
+    n_basins = screen["n"]
+    focus_id = None
+    if n_basins > 1:
+        rank_to_id = {r["rank"]: r["basin_id"] for r in basin_rows(fc) if r["rank"] is not None}
+        jump_rank = st.number_input("Jump to rank", min_value=0, max_value=n_basins, value=0, step=1,
+                                    key="jump_rank",
+                                    help="0 = show the whole fire; 1..N zooms the map to that Arm A rank.")
+        if jump_rank >= 1:
+            focus_id = rank_to_id.get(int(jump_rank))
+    st_folium(build_basin_map(fc, focus_basin_id=focus_id), height=520, use_container_width=True,
+              key="result_map")
     st.caption("Fill = Arm A screening rank (hot = higher priority). **Blue dashed outline = Arm A "
                "and Arm B disagree on rank** — treat that basin as rank-uncertain.")
 
@@ -691,8 +759,9 @@ def main():
             "ordinal ranking only (not comparable across fires).\n"
             "- **Two terrain tiers** — range-front fires (canyon mouths draining onto a plain) get "
             "the validated `score` ranking; incised-valley fires (no range-front break to anchor "
-            "to) get an exploratory sub-basin ranking instead, led by **intensity** (burn × slope) "
-            "because basin size doesn't carry the same meaning without canyon-mouth catchments."
+            "to) get an exploratory sub-basin ranking by that same frozen `score`, with an "
+            "**intensity** (burn × slope) companion column — area is a segmentation artifact there, so "
+            "intensity is a secondary lens (it scored higher on the one validation case), not the headline."
         )
 
     # B: surface the frozen score's inputs (burn x slope x area) beside the score so the ranking is
@@ -708,11 +777,11 @@ def main():
         "rank_b": "Rank (Arm B)", "score_b": "Score (Arm B)",
         "rank_delta": "Rank Δ", "uncertain": "Rank-uncertain",
     }
-    if screen.get("incised"):   # A39: intensity is the headline ordering on incised terrain
-        rows = sorted(rows, key=lambda r: r["intensity_rank"])
+    if screen.get("incised"):   # A40: incised ranks by the frozen `score` (headline); intensity = companion
         column_config["intensity"] = st.column_config.NumberColumn(
             "Intensity", format="%.4f",
-            help="= mean burn × mean slope (headline order on incised terrain; independent of area)")
+            help="= mean burn × mean slope, area-independent — an exploratory companion lens on incised "
+                 "terrain (scored higher than score on the one validation case); the headline ranking is score")
         column_config["intensity_rank"] = "Intensity rank"
     st.dataframe(rows, use_container_width=True, column_config=column_config)
     st.caption("Screening score = mean burn severity × mean slope × contributing area (km²) — the "
