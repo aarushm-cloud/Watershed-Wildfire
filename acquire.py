@@ -117,7 +117,7 @@ def canonical_grid(west: float, south: float, east: float, north: float, *,
 
     Reprojection uses the 4 CORNER POINTS (exact inverses -> no edge bowing), taking min/max --
     NOT rasterio.warp.transform_bounds, whose edge densification returns the outward-bowing
-    enclosing box and inflates a UTM round-trip by ~1-2% (see tests/test_acquire_grid.py). Shape
+    enclosing box and inflates a UTM round-trip by ~1-2% (see tests/acquire/test_acquire_grid.py). Shape
     uses round() -- the unique rule reproducing South Fork's frozen 1439 x 966 from its bbox.
     The grid is upper-left anchored so an arbitrary UTM corner (e.g. 426400.8) is preserved exactly.
     """

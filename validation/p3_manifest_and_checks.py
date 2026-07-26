@@ -144,7 +144,7 @@ def main():
     # ---- (h) frozen-constants pytest green ----
     proc = subprocess.run(
         ["conda", "run", "-n", "wildfire-watershed", "python", "-m", "pytest",
-         "tests/test_dnbr_frozen_constants.py", "-q"],
+         "tests/acquire/test_dnbr_frozen_constants.py", "-q"],
         cwd=_REPO, capture_output=True, text=True)
     h_ok = proc.returncode == 0
     chk("(h) frozen-constants pytest", h_ok, (proc.stdout.strip().splitlines() or ["<no output>"])[-1])
@@ -167,7 +167,7 @@ def main():
             "made CANONICAL_CRS per-fire (threaded via dem_profile[crs], Montecito 32611 behavior-lock "
             "byte-unchanged), so src.ingest.ingest_dnbr_both_arms now runs clean on the 32613 grid. "
             "Acquisition deliverables (DEM/dNBR/reference/assets/scenes) are complete; the "
-            "ingest-dependent checks (b-f,i) PASS. See docs/P3.2_BUILD_REPORT.md and the A25 commit."),
+            "ingest-dependent checks (b-f,i) PASS. See validation/reports/P3.2_BUILD_REPORT.md and the A25 commit."),
         "frozen_grid": {"crs": FROZEN["crs"], "cell_m": 10.0, "shape_rows_cols": FROZEN["shape"],
                         "transform": (dem_src or {}).get("transform"),
                         "bbox": (dem_src or {}).get("bbox"),

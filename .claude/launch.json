@@ -6,7 +6,7 @@
       "runtimeExecutable": "/Users/aarushmadhireddy/miniconda3/envs/wildfire-watershed/bin/streamlit",
       "runtimeArgs": [
         "run",
-        "/Users/aarushmadhireddy/Documents/Wildfire-Watershed-incised/app.py",
+        "/Users/aarushmadhireddy/Documents/Wildfire-Watershed/app.py",
         "--server.port",
         "8501",
         "--server.headless",

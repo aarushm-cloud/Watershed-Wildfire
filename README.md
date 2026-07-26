@@ -210,7 +210,7 @@ The case is locked by the test suite — ranking order, AUC, basin count, and a 
 
 ## Limitations
 
-The tool is a screening aid, and its rankings are meant to be read with these boundaries in mind. (This section is self-contained; `docs/limitations.md` is a placeholder pending the Phase-6 handoff writeup.)
+The tool is a screening aid, and its rankings are meant to be read with these boundaries in mind. (This section is self-contained, and is the source for the Phase-6 handoff writeup.)
 
 - **Rankings are relative and within-fire.** A ranking orders basins within a single fire; it is not a probability, a volume, or a comparison between fires.
 - **Fixed dNBR breaks are region-dependent.** Published per-fire calibrated thresholds vary widely, and absolute-dNBR thresholding carries a documented bias in sparsely-vegetated terrain (chaparral, shrubland, arid sites — precisely Montecito's terrain, and precisely where the bias is worst). The tool adopts a generic table literally and un-tuned; the classes are a first approximation. The best CBI-validated dNBR datasets are confined to western-US conifer forests, so even the accuracy ceiling (~50% of variance explained, ~60% overall accuracy) is an out-of-domain extrapolation here — well within what an ordinal triage ranker tolerates, well outside what a prediction could.
@@ -249,7 +249,6 @@ Deliberately spare: five pipeline stages, a per-fire config and a data contract,
 ```
 Wildfire-Watershed/
 ├── README.md                  # this file — what & why, how to read outputs, method
-├── ARCHITECTURE.md            # module + data-contract spec (stub)
 ├── environment.yml            # pinned conda environment
 ├── environment.lock.yml       # captured conda lockfile (exact solve)
 │
@@ -277,19 +276,28 @@ Wildfire-Watershed/
 ├── out/                       # generated, namespaced PER FIRE (never flat)
 │   └── <fire>/                #   ranking.csv · basins.geojson
 │
-├── validation/                # the Montecito oracle (gate.py, locked by tests), the dNBR swap finding,
-│   │                          #   the incised South Fork concordance check, the pyflwdir cross-check
+├── validation/                # oracles + the one-off phase drivers that produced them (see validation/README.md)
 │   ├── gate.py                # reconstructed Week-0 oracle (AUC 0.9722 / 36 basins / 44.7273 km²)
-│   ├── VALIDATION_REPORT.md   # the SBS validation writeup
-│   ├── DNBR_VALIDATION_FINDING.md   # the dNBR input-swap finding
-│   └── a39_southfork_concordance.py # incised concordance vs USGS sfk2024
+│   ├── reports/               # frozen write-ups — read-only anchors, never edited to make a run pass (A16)
+│   │   ├── VALIDATION_REPORT.md        # the SBS validation writeup
+│   │   ├── DNBR_VALIDATION_FINDING.md  # the dNBR input-swap finding
+│   │   ├── P2_PREREGISTRATION.md       # the frozen dNBR constants (fused to code by a test)
+│   │   ├── P3.1_PREREGISTRATION.md     # South Fork generalization pre-registration
+│   │   └── P3.2_BUILD_REPORT.md        # South Fork build report + acquisition checks
+│   ├── p2_*.py  p3_*.py       # phase drivers, grouped by prefix (flat on purpose — see validation/README.md)
+│   ├── cf11_pyflwdir_crosscheck.py     # independent flow-engine cross-check
+│   └── a39_southfork_concordance.py    # incised concordance vs USGS sfk2024
+│
 ├── tests/                     # behavior locks (ranking order + AUC 0.9722, frozen constants, terrain routing)
+│   ├── conftest.py  fixtures/ # shared fixtures + synthetic DEMs
+│   ├── core/                  # pipeline invariants: the behavior lock, CRS, scoring properties, guards
+│   ├── terrain/               # the A27/A39 two-tier router: detection, incised ranking, sub-basins
+│   ├── acquire/               # the network seam: scene select, dNBR creation, both arms, frozen constants
+│   └── app/                   # Streamlit helpers + the entrypoint
+│
 └── docs/
     ├── ALGORITHMS.md          # the deep, maintained algorithm reference (start here for method detail)
-    ├── ALGORITHMS_REVIEW.md   # design-review notes (2026-07-06; predates the incised + auto-acquire builds)
-    ├── methodology.md         # stub (Phase-6 handoff writeup pending)
-    ├── limitations.md         # stub (see Limitations above)
-    └── science_reference.md   # stub (scoring math + guardrail)
+    └── ALGORITHMS_REVIEW.md   # design-review notes (2026-07-06; predates the incised + auto-acquire builds)
 ```
 
 Pure-Python pipeline, installed via conda (the reliable path for the GDAL/GEOS/PROJ-backed geospatial stack):

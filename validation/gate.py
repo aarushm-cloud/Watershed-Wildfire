@@ -4,7 +4,7 @@ parameters. Reproduces the ranking ORDER + both pre-registered pass criteria
 (top-tercile 6/6, #1 = Cold Spring, flowed); the reconstruction lands at 36
 basins / rank-AUC 0.9722 / 44.73 km2 master outlet -- the AOI-shift findings the
 behavior lock anchors on, NOT the report's documented 32 / 0.987 / 39.19 (see
-tests/test_behavior_lock.py). Not to be edited to make a run pass. See DECISIONS A16.
+tests/core/test_behavior_lock.py). Not to be edited to make a run pass. See DECISIONS A16.
 
 The PIPELINE itself (run_pipeline + the stage wiring + the A27/A31 refusal +
 MONTECITO_FIRE/SOUTHFORK_FIRE + the reconstruction I/O anchors) was PROMOTED verbatim

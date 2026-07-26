@@ -17,7 +17,7 @@ result is stamped with the inputs that produced it; editing the box/upload flags
 
 Testability: all logic lives in pure, importable helpers; the Streamlit UI is in `main()` behind
 an `if __name__ == "__main__"` guard, so `import app` (tests) never executes the UI. See
-tests/test_app.py. Run the app with:  streamlit run app.py
+tests/app/test_app.py. Run the app with:  streamlit run app.py
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ RANK_UNCERTAIN_FRAC = 0.06
 _BBOX_DP = 5
 
 
-# ---- pure helpers (no Streamlit; unit-tested in tests/test_app.py) ------------------------------
+# ---- pure helpers (no Streamlit; unit-tested in tests/app/test_app.py) ------------------------------
 
 def validate_bbox(west, south, east, north) -> tuple:
     """Fail loud + legible on a malformed bbox BEFORE any network work (A8). Returns floats."""
@@ -198,7 +198,7 @@ def run_screening(bbox_raw, dnbr_file, *, name="frontend", contour_m=150.0):
     which the old narrow except let straight through to a Streamlit traceback) hits the backstop and
     is prefixed with its type. Not a swallow: the failure is NAMED in the message and nothing is
     retried or defaulted (A8 -- the sin is silence, not scope). Pure orchestration, no st.* calls,
-    so tests drive it directly with fakes (tests/test_app.py)."""
+    so tests drive it directly with fakes (tests/app/test_app.py)."""
     out_dir = None
     try:
         # deferred imports INSIDE the try (still keeping `import app` light for unit tests): an

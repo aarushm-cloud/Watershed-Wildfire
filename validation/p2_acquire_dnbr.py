@@ -1,6 +1,6 @@
 """P2.0 -- acquire the Thomas Fire dNBR onto its NATIVE grid (no reprojection).
 
-GATE (frozen by P2.1 `validation/P2_PREREGISTRATION.md`, amended by A21):
+GATE (frozen by P2.1 `validation/reports/P2_PREREGISTRATION.md`, amended by A21):
   Produce a single RAW, continuous dNBR raster on disk + a Provenance stamp.
   HARD STOP here: NO thresholding, NO 0.1 floor, NO class-15 mask, NO normalization,
   NO mean_burn, NO binning, NO scoring. Those are P2.2b / P2.3.

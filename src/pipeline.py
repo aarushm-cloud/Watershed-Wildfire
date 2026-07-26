@@ -358,7 +358,7 @@ def evaluate(basins, ranked, creek_nearest, match_m):
 # A39 terrain router (supersedes the A27 refusal gate) -- DECISIONS A27/A27.1/A39.
 # write_refusal was removed (post-review ruling): once terrain shape stopped triggering it, it had
 # no live caller left, production or test. build_refusal_message stays in src/outputs.py for its one
-# remaining caller (tests/test_a27_applicability.py group C, the detector's message unit tests) but
+# remaining caller (tests/terrain/test_a27_applicability.py group C, the detector's message unit tests) but
 # is no longer imported here since this module never called it either.
 # ---------------------------------------------------------------------------
 def _terrain_mode(dem_raw, dem_nodata):
