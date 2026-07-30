@@ -501,3 +501,185 @@ def test_recommendation_package_provenance(monkeypatch):
     from src.outputs import DNBR_FRAMING, SCREENING_STATEMENT
     assert result["framing"]["screening"] == SCREENING_STATEMENT
     assert result["framing"]["dnbr"] == DNBR_FRAMING
+
+
+# ---- F-1 / F-4 gating fixes (stress test 2026-07-27) ----
+#
+# F-1: the selector must never hand the approval UI an S2 pair whose processing
+#      baseline the creator's frozen >=04.00 assert will refuse AFTER approval.
+# F-4: MGRS tiles overlap at UTM zone boundaries, so a same-day S2 group can span
+#      two zones even when the FIRE is single-zone; that abort formerly escaped
+#      select() from inside the S2 iteration, so the documented Landsat pair-level
+#      fallback never ran (measured: Montecito/Trout/Buck/Black all refused with
+#      10-30 clean single-zone Landsat candidates available).
+
+
+def _zcand(cid, d, *, sensor="S2", epsg=32611, cloud=1.0):
+    """Single-zone candidate fixture carrying an epsg (the F-4 discriminator)."""
+    c = _cand(cid, d, sensor=sensor, cloud=cloud)
+    c["epsg"] = epsg
+    return c
+
+
+def _zgroup(gid, d, *, sensor="S2", epsgs=(32610, 32611), cloud=1.0):
+    """Grouped candidate whose same-day member tiles sit in DIFFERENT UTM zones
+    (the MGRS boundary-overlap case group_candidates produces)."""
+    members = [
+        {**_cand(f"{gid}_m{i}", d, sensor=sensor, cloud=cloud), "epsg": z}
+        for i, z in enumerate(epsgs)
+    ]
+    return {
+        "id": "+".join(m["id"] for m in members),
+        "sensor": sensor,
+        "date": d,
+        "tile_cloud_pct": cloud,
+        "footprint": _COVERING_FOOTPRINT,
+        "processing_baseline": "05.00" if sensor == "S2" else None,
+        "items": members,
+    }
+
+
+def test_baseline_floor_is_single_sourced_and_unchanged():
+    """S2_MIN_BASELINE moves to scene_select (the selector now enforces it too);
+    the VALUE stays the frozen 04.00 (pre-reg D) in both modules."""
+    from autoacquire import dnbr_create
+    assert ss.S2_MIN_BASELINE == 4.0
+    assert dnbr_create.S2_MIN_BASELINE == 4.0
+
+
+def test_s2_baseline_eligibility_mirrors_the_creators_frozen_assert():
+    assert ss.s2_baseline_eligible("05.12") is True
+    assert ss.s2_baseline_eligible("04.00") is True     # boundary: >= , not >
+    assert ss.s2_baseline_eligible("03.01") is False
+    assert ss.s2_baseline_eligible("00.01") is False    # the Thomas-era product
+    assert ss.s2_baseline_eligible(None) is False       # absent field: creator aborts on it
+
+
+class _CannedResp:
+    def __init__(self, features):
+        self._features = features
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"features": self._features}
+
+
+def _feature(fid, iso_dt, *, baseline=None, epsg=32611, cloud=1.0):
+    return {
+        "id": fid,
+        "properties": {
+            "datetime": iso_dt,
+            "eo:cloud_cover": cloud,
+            "s2:processing_baseline": baseline,
+            "proj:epsg": epsg,
+        },
+        "geometry": _COVERING_FOOTPRINT,
+        "assets": {k: {"href": k} for k in ("scl", "qa_pixel", "nir08", "swir22")},
+    }
+
+
+def test_search_drops_sub_baseline_s2_members_before_grouping(monkeypatch):
+    """The _0_L2A/_1_L2A twin case: two processing runs of ONE acquisition. The
+    stale 00.01 member must not survive to poison the group the creator asserts on."""
+    feats = [
+        _feature("S2A_X_20171115_0_L2A", "2017-11-15T18:00:00Z", baseline="00.01"),
+        _feature("S2A_X_20171115_1_L2A", "2017-11-15T18:00:00Z", baseline="05.00"),
+        _feature("S2A_X_20171120_0_L2A", "2017-11-20T18:00:00Z", baseline=None),
+    ]
+    monkeypatch.setattr("requests.post",
+                        lambda url, json=None, timeout=None: _CannedResp(feats))
+    pool = ss._search_scenes("S2", BBOX, date(2017, 11, 1), date(2017, 12, 1))
+    ids = [m["id"] for c in pool for m in (c.get("items") or [c])]
+    assert ids == ["S2A_X_20171115_1_L2A"]
+
+
+def test_search_applies_no_baseline_filter_to_landsat(monkeypatch):
+    """Landsat carries no S2 baseline; the F-1 member filter must not touch it."""
+    feats = [_feature("LC08_Y_20171115", "2017-11-15T18:00:00Z", baseline=None)]
+    monkeypatch.setattr("requests.post",
+                        lambda url, json=None, timeout=None: _CannedResp(feats))
+    pool = ss._search_scenes("Landsat", BBOX, date(2017, 11, 1), date(2017, 12, 1))
+    assert [c["id"] for c in pool] == ["LC08_Y_20171115"]
+
+
+def test_zone_spanning_s2_group_falls_back_to_landsat(monkeypatch):
+    """The headline F-4 case: every S2 candidate spans two zones -> S2 yields no
+    usable candidate, the LANDSAT arm must still be tried (it formerly never ran)."""
+    s2_pre = _zgroup("S2PRE", date(2026, 6, 1))
+    s2_post = _zgroup("S2POST", date(2026, 6, 25))
+    ls_pre = _zcand("LS_PRE", date(2026, 6, 2), sensor="Landsat", epsg=32611)
+    ls_post = _zcand("LS_POST", date(2026, 6, 26), sensor="Landsat", epsg=32611)
+    _patch_search(monkeypatch, s2_pre=[s2_pre], s2_post=[s2_post],
+                  ls_pre=[ls_pre], ls_post=[ls_post])
+    monkeypatch.setattr(ss, "_candidate_valid_mask", _mask_lookup({
+        s2_pre["id"]: _full(1.0), s2_post["id"]: _full(1.0),
+        "LS_PRE": _full(1.0), "LS_POST": _full(1.0),
+    }))
+    result = ss.select(BBOX, ignition=date(2026, 6, 8), containment=date(2026, 6, 20),
+                       today=date(2026, 7, 17))
+    assert result["status"] == "recommended"
+    assert result["pair"]["sensor"] == "Landsat"
+    zone_rejects = [r for c, r in result["rejected"] if "UTM zone" in r]
+    assert len(zone_rejects) == 2, "both spanning S2 groups must reach the audit trail"
+
+
+def test_single_zone_s2_still_wins_beside_a_zone_spanning_sibling(monkeypatch):
+    """No over-reach: dropping spanning groups must not force Landsat when a clean
+    single-zone S2 pair exists in the same pool."""
+    span_post = _zgroup("SPAN", date(2026, 6, 22))          # earliest post -> evaluated first
+    clean_pre = _zcand("S2_PRE", date(2026, 6, 1))
+    clean_post = _zcand("S2_POST", date(2026, 6, 25))
+    ls_pre = _zcand("LS_PRE", date(2026, 6, 2), sensor="Landsat")
+    ls_post = _zcand("LS_POST", date(2026, 6, 26), sensor="Landsat")
+    _patch_search(monkeypatch, s2_pre=[clean_pre], s2_post=[span_post, clean_post],
+                  ls_pre=[ls_pre], ls_post=[ls_post])
+    monkeypatch.setattr(ss, "_candidate_valid_mask", _mask_lookup({
+        "S2_PRE": _full(1.0), "S2_POST": _full(1.0), span_post["id"]: _full(1.0),
+        "LS_PRE": _full(1.0), "LS_POST": _full(1.0),
+    }))
+    result = ss.select(BBOX, ignition=date(2026, 6, 8), containment=date(2026, 6, 20),
+                       today=date(2026, 7, 17))
+    assert result["status"] == "recommended"
+    assert result["pair"]["sensor"] == "S2"
+    assert result["pair"]["pre"]["id"] == "S2_PRE"
+    assert result["pair"]["post"]["id"] == "S2_POST"
+    assert any("UTM zone" in r for c, r in result["rejected"])
+
+
+def test_cross_zone_landsat_pair_is_never_proposed(monkeypatch):
+    """F-4b: each scene single-zone but pre in 12N / post in 13N -> that pair is
+    exactly what dnbr_create._zones refuses AFTER approval. The selector must skip
+    it and take the later same-zone post instead."""
+    pre12 = _zcand("PRE_12", date(2026, 6, 1), sensor="Landsat", epsg=32612)
+    post13 = _zcand("POST_13", date(2026, 6, 22), sensor="Landsat", epsg=32613)
+    post12 = _zcand("POST_12", date(2026, 6, 30), sensor="Landsat", epsg=32612)
+    _patch_search(monkeypatch, ls_pre=[pre12], ls_post=[post13, post12])
+    monkeypatch.setattr(ss, "_candidate_valid_mask", _mask_lookup({
+        "PRE_12": _full(1.0), "POST_13": _full(1.0), "POST_12": _full(1.0),
+    }))
+    result = ss.select(BBOX, ignition=date(2026, 6, 8), containment=date(2026, 6, 20),
+                       today=date(2026, 7, 17))
+    assert result["status"] == "recommended"
+    assert result["pair"]["pre"]["id"] == "PRE_12"
+    assert result["pair"]["post"]["id"] == "POST_12"
+    assert any("zone" in r.lower() for c, r in result["rejected"]
+               if c["id"] == "POST_13"), "the skipped cross-zone post needs an audit entry"
+
+
+def test_alternatives_never_include_a_cross_zone_swap(monkeypatch):
+    """The swap UI offers alternatives -- offering one the creator refuses would
+    reopen the same approve-then-abort seam through the side door."""
+    pre12 = _zcand("PRE_12", date(2026, 6, 1), sensor="Landsat", epsg=32612)
+    post12 = _zcand("POST_12", date(2026, 6, 22), sensor="Landsat", epsg=32612)
+    post13 = _zcand("POST_13", date(2026, 6, 30), sensor="Landsat", epsg=32613)
+    _patch_search(monkeypatch, ls_pre=[pre12], ls_post=[post12, post13])
+    monkeypatch.setattr(ss, "_candidate_valid_mask", _mask_lookup({
+        "PRE_12": _full(1.0), "POST_12": _full(1.0), "POST_13": _full(1.0),
+    }))
+    result = ss.select(BBOX, ignition=date(2026, 6, 8), containment=date(2026, 6, 20),
+                       today=date(2026, 7, 17))
+    assert result["pair"]["post"]["id"] == "POST_12"
+    alt_post_ids = [c["id"] for c in result["alternatives"]["post"]]
+    assert "POST_13" not in alt_post_ids

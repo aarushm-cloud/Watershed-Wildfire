@@ -50,14 +50,12 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.grids import GateAbort  # noqa: E402
-from autoacquire.scene_select import (  # noqa: E402  (single source for the frozen mask sets)
-    S2_BAD_SCL,
-    landsat_valid_mask,
+from autoacquire.scene_select import (  # noqa: E402  (single source for the frozen mask sets
+    S2_BAD_SCL,                         #  AND the frozen baseline floor -- S2_MIN_BASELINE
+    S2_MIN_BASELINE,                    #  moved there verbatim 2026-07-28 so the selector
+    landsat_valid_mask,                 #  enforces it too; value unchanged, pre-reg D)
     _sign_mpc,
 )
-
-# Frozen adapter constants (transcribed from the validated working code).
-S2_MIN_BASELINE = 4.0        # assert processing baseline >= 04.00, numeric (pre-reg D)
 S2_SR_CLIP = (0.0, 1.6)      # putah_dnbr L2A SR hygiene clip [dimensionless]
 S2_DEN_GUARD = 0.02          # putah_dnbr: tiny-denominator NBR blowup guard
 LS_SR_SCALE, LS_SR_OFFSET = 0.0000275, -0.2   # p2_acquire_dnbr C2L2 SR scaling

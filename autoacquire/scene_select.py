@@ -72,6 +72,13 @@ S2_COLLECTION = "sentinel-2-l2a"
 S2_BAD_SCL = (0, 1, 3, 6, 8, 9, 10, 11)  # nodata, defective, cloud-shadow, water,
                                           # cloud-medium, cloud-high, cirrus, snow
 S2_REVISIT_DAYS = 5           # ~5 d (2-satellite constellation)
+S2_MIN_BASELINE = 4.0         # [ADOPT] S2 processing baseline >= 04.00 (in operations since
+                              # 25 Jan 2022) -- the frozen SR offset (-1000) in the creator
+                              # is wrong below it. Value moved here VERBATIM from dnbr_create
+                              # (single source; the creator now imports it) so the SELECTOR
+                              # also enforces it: the stress test (2026-07-27, F-1) showed a
+                              # pre-2022 fire getting a graded scorecard the creator then
+                              # aborted on AFTER the human approval gate.
 
 LANDSAT_STAC = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
 LANDSAT_SIGN = "https://planetarycomputer.microsoft.com/api/sas/v1/sign?href="
@@ -324,6 +331,16 @@ def _baseline_num(b):
         return None
 
 
+def s2_baseline_eligible(baseline) -> bool:
+    """True iff an S2 member meets the frozen >= 04.00 floor (F-1 seam close).
+
+    Mirrors dnbr_create._assert_s2_baseline exactly, including its treatment of an
+    ABSENT baseline as ineligible -- a scene this returns False for would abort the
+    build after human approval, so it must never enter the candidate pool."""
+    num = _baseline_num(baseline)
+    return num is not None and num >= S2_MIN_BASELINE
+
+
 # ---------------------------------------------------------------------------
 # Network seams (monkeypatched in tests; live implementations below)
 # ---------------------------------------------------------------------------
@@ -366,6 +383,12 @@ def _search_scenes(sensor, bbox, d0, d1):
         if not iso:
             continue
         y, m, d = (int(x) for x in iso.split("-"))
+        # F-1 (stress test 2026-07-27): drop S2 members below the frozen baseline
+        # floor BEFORE grouping, so a stale _0_L2A twin cannot poison a group whose
+        # _1_L2A reprocessing is usable, and a pre-2022 fire's empty S2 pool falls
+        # through to the Landsat arm instead of a scorecard the creator aborts on.
+        if sensor == "S2" and not s2_baseline_eligible(props.get("s2:processing_baseline")):
+            continue
         epsg = props.get("proj:epsg")
         if epsg is None and isinstance(props.get("proj:code"), str):
             code = props["proj:code"]
@@ -476,6 +499,50 @@ def _sign_mpc(href):
 
 
 # ---------------------------------------------------------------------------
+# F-4 zone eligibility (stress test 2026-07-27) -- MGRS tiles overlap at UTM zone
+# boundaries, so a same-day S2 group can span two zones even when the FIRE sits
+# entirely in one. Such a group is unbuildable as a single native-lattice product
+# (dnbr_create's _zones guard refuses it), and the mask-read abort it used to hit
+# ESCAPED select() from inside the S2 iteration -- so the documented Landsat
+# pair-level fallback never ran (measured: Montecito/Trout/Buck/Black all refused
+# with 10-30 clean single-zone Landsat candidates available). Zone-spanning groups
+# are now REJECTED into the audit trail at selection time; the mask-read abort
+# remains as a defense-in-depth backstop for non-select callers.
+# ---------------------------------------------------------------------------
+
+
+def _zones_of(candidate):
+    """Distinct member UTM zones (mirrors dnbr_create._zones; unknown -> empty set)."""
+    members = candidate.get("items") or [candidate]
+    return {m.get("epsg") for m in members if m.get("epsg") is not None}
+
+
+def _reject_zone_spanning(candidates, rejected):
+    """Partition out groups whose member tiles span >1 UTM zone (audit-trailed)."""
+    kept = []
+    for c in candidates:
+        zones = _zones_of(c)
+        if len(zones) > 1:
+            rejected.append((c, (
+                f"tile group spans UTM zones {sorted(zones)} (MGRS overlap at a zone "
+                "boundary) -- unbuildable as one native-lattice product; single-zone "
+                "candidates and the Landsat fallback still compete"
+            )))
+        else:
+            kept.append(c)
+    return kept
+
+
+def _pair_zone_ok(pre, post):
+    """A pair must live in ONE zone or the creator refuses it after approval.
+
+    Unknown zones (hermetic fixtures; a STAC item missing proj:epsg) pass -- the
+    creator's _zones union check remains the authoritative backstop there."""
+    za, zb = _zones_of(pre), _zones_of(post)
+    return not za or not zb or za == zb
+
+
+# ---------------------------------------------------------------------------
 # Stages 5-7 -- select, rank alternatives, package (the driver)
 # ---------------------------------------------------------------------------
 
@@ -516,6 +583,10 @@ def select(bbox, *, ignition, containment, today=None, greenup_days=GREENUP_DEFA
         )
         all_rejected.extend(pre_rej)
         all_rejected.extend(post_rej)
+        # F-4a: zone-spanning groups are rejections, never aborts -- the sensor
+        # loop must survive to try Landsat (see the F-4 block above).
+        pre_surv = _reject_zone_spanning(pre_surv, all_rejected)
+        post_surv = _reject_zone_spanning(post_surv, all_rejected)
         any_clean_pre = any_clean_pre or bool(pre_surv)
         if not pre_surv or not post_surv:
             continue
@@ -532,7 +603,13 @@ def select(bbox, *, ignition, containment, today=None, greenup_days=GREENUP_DEFA
 
         for post in posts:
             best_frac = None
+            zone_blocked = False
             for pre in pres:
+                # F-4b: a cross-zone (pre, post) is exactly what the creator's
+                # _zones guard refuses AFTER approval -- skip before any mask read.
+                if not _pair_zone_ok(pre, post):
+                    zone_blocked = True
+                    continue
                 m = pair_metrics(_mask(pre), _mask(post))
                 if passes_box_gate(m["pair_valid_frac"]):
                     chosen = {"sensor": sensor, "pre": pre, "post": post, "metrics": m}
@@ -542,21 +619,32 @@ def select(bbox, *, ignition, containment, today=None, greenup_days=GREENUP_DEFA
                 )
             if chosen:
                 break
-            all_rejected.append((post, (
-                f"box-gate: best combined pre-AND-post valid fraction "
-                f"{(best_frac or 0.0) * 100:.0f}% < {BOX_GATE_FLOOR * 100:.0f}% floor"
-            )))
+            if best_frac is None and zone_blocked:
+                all_rejected.append((post, (
+                    f"UTM-zone mismatch: no pre-scene shares this post-scene's zone "
+                    f"{sorted(_zones_of(post))} -- a cross-zone pair is unbuildable "
+                    "(mirrors the creator's _zones guard)"
+                )))
+            else:
+                all_rejected.append((post, (
+                    f"box-gate: best combined pre-AND-post valid fraction "
+                    f"{(best_frac or 0.0) * 100:.0f}% < {BOX_GATE_FLOOR * 100:.0f}% floor"
+                )))
         if not chosen:
             continue
 
         # Ranked, pre-vetted alternatives for the independent pre/post swap (spec 7):
         # each option re-gated against the chosen partner, order preserved.
+        # F-4b applies to swaps too: an alternative the creator refuses would
+        # reopen the approve-then-abort seam through the side door.
         alt_pre = [
             c for c in pres if c["id"] != chosen["pre"]["id"]
+            and _pair_zone_ok(c, chosen["post"])
             and passes_box_gate(pair_metrics(_mask(c), _mask(chosen["post"]))["pair_valid_frac"])
         ]
         alt_post = [
             c for c in posts if c["id"] != chosen["post"]["id"]
+            and _pair_zone_ok(chosen["pre"], c)
             and passes_box_gate(pair_metrics(_mask(chosen["pre"]), _mask(c))["pair_valid_frac"])
         ]
         chosen["alt_pre"], chosen["alt_post"] = alt_pre, alt_post
