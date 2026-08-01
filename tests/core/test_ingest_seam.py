@@ -1,17 +1,11 @@
-"""P2.2a INGEST-SEAM tests -- prove the A15 seam (src/ingest.select_burn_source) is real, not
+"""INGEST-SEAM tests -- prove the A15 seam (src/ingest.select_burn_source) is real, not
 merely present.
 
 The behavior lock (tests/core/test_behavior_lock.py) exercises only the SBS path, so it can never reach
 the dNBR branch. These tests pin that branch directly:
-  - partial-SBS (a cell outside the codeset) resolves to "dNBR" (P2.2b WIRED this branch -- it
-    previously raised NotImplementedError("dNBR arm: P2.2b"); the arm now exists, so the seam
-    selects dNBR instead of raising), and
+  - partial-SBS (a cell outside the codeset) resolves to "dNBR", and
   - codeset-covered SBS resolves to "SBS" (the negative control that proves the dNBR test isn't
     vacuously passing because selection always returns one answer).
-
-P2.2b UPDATE (verification §1, fix 8): the previous version of the third test asserted the branch
-RAISED. P2.2b makes it stop raising (the arm is built), so that assertion is replaced -- NOT deleted
--- with one that the branch now resolves to "dNBR". The SBS lock itself stays 7/7, untouched.
 
 Coverage definition (owner decision 2026-06-16): a cell is valid SBS data iff its value is in the
 known BAER codeset {0,1,2,3,4,15}; class 15 (outside-perimeter) COUNTS as covered. "Covers the AOI"

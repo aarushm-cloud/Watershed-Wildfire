@@ -1,17 +1,13 @@
-"""A39-era WIRED-PATH tests for the terrain router + polymorphic dispatch.
+"""WIRED-PATH tests for the terrain router + polymorphic dispatch (A39).
 
-Originally P3.4-build-2: proved the A27 refusal was reached through `validation/gate.py`'s live
-wiring (the A27-before-A25 seam `_terrain_applicability_gate` -> `write_refusal` -> the polymorphic
-`run_pipeline` return contract -> caller-side `dispatch_result`). A39 replaced the refuse-only gate
-with a route-not-refuse router (`_terrain_mode`): incised terrain now reaches a RANKED result, not
-a refusal (`test_wired_seam_ranks_on_incised_fixture`). `write_refusal` was removed as dead code
-(post-review ruling) once terrain shape was its only trigger and stopped calling it; the
-`dispatch_result` "refused" branch and the tests below stay live for any FUTURE non-terrain
-refusal trigger -- they exercise it with hand-built `{"status": "refused", ...}` dicts, since no
-production code currently builds one.
+The router (`_terrain_mode`) routes rather than refuses: incised terrain reaches a RANKED
+result (`test_wired_seam_ranks_on_incised_fixture`), never a terrain refusal. The
+`dispatch_result` "refused" branch and its tests stay live for any FUTURE non-terrain
+refusal trigger -- they exercise it with hand-built `{"status": "refused", ...}` dicts,
+since no production code currently builds one.
 
-The behavior lock (tests/core/test_behavior_lock.py) is deliberately NOT extended to assert `status`;
-the Montecito-returns-`ranked` invariant lives HERE (new file) to keep the lock byte-frozen.
+The behavior lock (tests/core/test_behavior_lock.py) is deliberately NOT extended to assert
+`status`; the Montecito-returns-`ranked` invariant lives HERE to keep the lock byte-frozen.
 
 Run:  pytest tests/terrain/test_a27_wired.py -v
 """

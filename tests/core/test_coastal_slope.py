@@ -1,11 +1,11 @@
-"""CF-B (A33, R1 -- override of the 2026-07-06 deferral, owner 2026-07-07): mean_slope_tan drops the
-nodata-adjacent ring so a coastal basin is not silently score-inflated.
+"""A33 coastal-slope: mean_slope_tan drops the nodata-adjacent ring so a coastal basin is not
+silently score-inflated.
 
-A valid land cell next to a 0-clamped nodata cell (FM-12) reads a spurious cliff under np.gradient --
-the contamination lives in the VALID cell whose 0-neighbor the gradient consumed, so masking at the
-mean does NOT remove it (A33 point 2). The fix drops that valid-but-contaminated ring at SOURCE
-(NaN via the shared _valid_dem_mask, answering A33's open question), and stage_2e_score means over
-the clean cells only. This synthetic fixture is the testable coastal case A33 said did not exist.
+A valid land cell next to a 0-clamped nodata cell (FM-12) reads a spurious cliff under
+np.gradient -- the contamination lives in the VALID cell whose 0-neighbor the gradient
+consumed, so masking at the mean does NOT remove it. The ring is dropped at SOURCE (NaN via
+the shared _valid_dem_mask), and stage_2e_score means over the clean cells only. The
+synthetic fixture provides the testable coastal case.
 """
 from __future__ import annotations
 

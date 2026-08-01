@@ -1,16 +1,8 @@
-"""A39 -- WhiteboxTools whole-network sub-basin delineation for incised terrain.
+"""subbasins.py -- WhiteboxTools sub-basin delineation for incised terrain (A39); range-front
+fires keep the pysheds canyon-mouth path. Breach-carve conditioning, confluence-split basins.
 
-Range-front fires do NOT use this module; they keep the pysheds canyon-mouth path.
-Incised terrain has no mountain front to anchor an outlet on, so basins are split at
-channel confluences instead. Conditioning is breach-carve rather than fill: filling raises
-an incised canyon floor to its spill level and smears the channel, which is the specific
-failure mode on this terrain.
-
-Construction is two-phase because the pipeline computes burn weights and slope AFTER
-delineation:
-  segment_subbasins()      -- needs only the DEM; runs at the delineation site
-  build_geometry_records() -- needs only the DEM; runs at the delineation site
-  filter_burned_steep()    -- needs burn + slope; runs after the dNBR ingest
+Two-phase (burn/slope don't exist until after ingest): segment_subbasins +
+build_geometry_records run at the delineation site; filter_burned_steep runs after ingest.
 """
 import shutil
 from pathlib import Path
@@ -145,15 +137,9 @@ def build_geometry_records(labels, dem_raw, dem_nodata, acc):
 
 
 def filter_burned_steep(records, burn_weight, slope_tan):
-    """Phase 2: keep sub-basins that are meaningfully burned and not degenerately flat.
-
-    A "burned" cell is burn_weight > 0, which reuses the frozen burn binning (dNBR >= 0.100
-    AND valid) rather than introducing a second severity threshold. Note that clouded or
-    NoData cells therefore count as unburned -- conservative, and consistent with the
-    frozen ingest.
-
-    basin_id is renumbered contiguously so downstream consumers see a dense 0..n-1 range.
-    """
+    """Phase 2: keep sub-basins that are meaningfully burned (burn_weight > 0 reuses the
+    frozen binning; clouded/NoData counts as unburned) and not degenerately flat.
+    basin_id renumbers to a dense 0..n-1."""
     kept = []
     for rec in records:
         m = rec["mask"]

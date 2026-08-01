@@ -1,4 +1,4 @@
-"""AA-3 (B4, Auto-Acquire Build-Plan Phase 3) -- thin wiring into the validated pipeline.
+"""autoacquire_run (B4) -- thin wiring into the validated pipeline.
 
 autoacquire_run composes selector -> (human approval gate) -> creator ->
 acquire.build_fire_config -> src.pipeline.run_pipeline. It adds NO new ingest code

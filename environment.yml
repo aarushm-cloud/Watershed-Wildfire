@@ -10,7 +10,7 @@
 #                                           platform noted at top, for bit-exact reproduction.
 #
 # Captures the live `wildfire-watershed` env under which the validated gate is green: cold
-# `pytest` -> 7/7 and `python validation/gate.py` -> canonical Montecito result
+# `pytest` -> full suite green and `python validation/gate.py` -> canonical Montecito result
 # (6/6 flowed in top tercile, #1 Cold Spring, master 44.73 km^2, rank-AUC 0.9722,
 # low_coverage 26, determinism identical). Verified by fresh-env recreation on osx-arm64.
 #

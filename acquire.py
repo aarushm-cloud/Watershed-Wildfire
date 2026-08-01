@@ -1,18 +1,7 @@
-"""acquire.py -- coordinate-driven acquisition layer (A35), a repo-root peer of run.py.
+"""acquire.py -- the network boundary (A35): bbox + uploaded dNBR -> staged DEM/buildings +
+the per-fire dict run_pipeline consumes. src/ stays a pure, no-network seam.
 
-Turns a bounding box + an uploaded dNBR raster into the staged files + the A30 `fire`
-dict that `src.pipeline.run_pipeline` consumes. This is the NETWORK boundary: `src/` is a
-pure, no-network seam (`ingest.py` bans import-time I/O), so all fetching lives HERE and
-stages files to disk -- network -> staged files -> pure pipeline -- exactly the pattern
-the proven `validation/p3_acquire_dem.py` / `p3_acquire_assets.py` scripts already follow.
-This module generalizes those two hardcoded-to-South-Fork scripts to an arbitrary bbox.
-
-Guardrail tier (CLAUDE.md): CF-6/7/8 are Tier-2 plumbing (porting proven fetch code).
-CF-9's dNBR raw-scale guard is Tier-1-adjacent -- it protects the frozen dNBR bins
-(`src.config.DNBR_BIN_EDGES` / `DNBR_CLAMP`, RAW scale), so it READS those, never re-derives.
-
-Fail-loud spine (A8): every acquisition precondition (all-NoData DEM, native-CRS drift,
-zero buildings over a populated AOI, an apparent x1000 dNBR upload) raises, never degrades.
+Every acquisition precondition raises, never degrades (A8).
 """
 from __future__ import annotations
 
@@ -41,31 +30,15 @@ from src.config import DNBR_CLAMP  # frozen RAW-dNBR clamp (0.100, 1.300) -- the
 from src.config import ALLOWED_UTM_ZONES  # A25 ingest allowlist -- the F7 front-door check reads it
 from src.grids import GateAbort    # the project's A8 fail-loud contract; app.py catches it uniformly
 
-CELL_M = 10.0   # canonical analysis resolution (m); matches src.config.CELL_M (the frozen grid)
+CELL_M = 10.0   # canonical analysis resolution (m); matches src.config.CELL_M
 
-# 3DEP 1/3 arc-second COG on AWS (anonymous https; DATA_SOURCES S1 path 1). One 1-degree tile per name.
+# 3DEP 1/3 arc-second COG on AWS (anonymous https); one 1-degree tile per name.
 _3DEP_COG = ("https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/"
              "{tile}/USGS_13_{tile}.tif")
 DEM_NODATA = -9999.0
-# CF-9 raw-scale guard thresholds (plumbing that PROTECTS the frozen raw bins, NOT frozen-science
-# values). raw dNBR is physically bounded: NBR = (NIR-SWIR)/(NIR+SWIR) is a normalized ratio in
-# [-1, 1], so dNBR = NBR_pre - NBR_post is in [-2, 2]; the vault's typical raw range is ~[-0.5, 1.3]
-# (DATA_SOURCES S2 / science_reference S6). A 99th-pct |dNBR| above the physical ceiling is an apparent
-# scale error (x1000, x-N, or an RdNBR upload) -> refuse (never silently rescale).
-DNBR_RAW_MAX_ABS = 2.0    # physical dNBR ceiling |dNBR| <= 2 (F1); above this the upload is mis-scaled
-# |v| above this is an obvious NoData/FILL sentinel (-9999, 3.4e38, 65535, ...), not dNBR at ANY
-# conventional scale (even x1000 dNBR tops out ~1300). Screened BEFORE the scale check so an UNDECLARED
-# nodata (read(masked=True) honors only a DECLARED nodata) can't false-refuse a valid raw raster.
-DNBR_FILL_ABS = 5000.0
-# F7 single-fire AOI cap (plumbing bound, NOT science; confidence `medium`, owner-tunable). A screening
-# AOI is one fire's burn area -- the validated/target cases are small-to-medium (South Fork ~0.014,
-# Thomas ~0.3 deg^2). 1 deg^2 (~110 x 92 km at 34N) clears those with headroom while refusing a
-# mis-drawn state/CONUS-scale box (hundreds of ~400 MB 3DEP tiles -> a hung fetch). CAVEAT: the largest
-# ~1M-acre megafire scars can exceed 1 deg^2 (Dixie 2021 ~1.5 clearly does; August Complex 2020 ~1.0-1.1
-# sits right at the strict-`>` boundary) -- acceptable for the niche (megafires get formal USGS
-# assessment; this tool targets the un-assessed small/medium gap) and the cap is owner-raisable.
-# deg^2 is a coarse lon/lat-box measure, not true area.
-MAX_BBOX_DEG2 = 1.0
+DNBR_RAW_MAX_ABS = 2.0    # physical dNBR ceiling; a 99th-pct above it = mis-scaled upload -> refuse
+DNBR_FILL_ABS = 5000.0    # obvious NoData/fill sentinel, screened BEFORE the scale check
+MAX_BBOX_DEG2 = 1.0       # single-fire AOI cap (plumbing bound, owner-raisable)
 
 
 def _norm_epsg(crs) -> str:
@@ -79,12 +52,7 @@ def _norm_epsg(crs) -> str:
 
 
 def utm_epsg(lon: float, lat: float) -> int:
-    """EPSG code of the UTM zone containing (lon, lat).
-
-    zone = floor((lon + 180) / 6) + 1  (1..60); northern hemisphere -> 326xx, southern -> 327xx.
-    The bbox centroid picks the zone for a new fire (DATA_SOURCES S1: reproject to a per-fire
-    metric UTM before hydrology). Values are degrees (lon E, lat N).
-    """
+    """EPSG code of the UTM zone containing (lon, lat) degrees; north -> 326xx, south -> 327xx."""
     zone = int(math.floor((lon + 180.0) / 6.0)) + 1
     zone = min(max(zone, 1), 60)
     return (32600 if lat >= 0 else 32700) + zone
@@ -92,14 +60,7 @@ def utm_epsg(lon: float, lat: float) -> int:
 
 @dataclass(frozen=True)
 class GridSpec:
-    """The canonical 10 m analysis grid -- the reproject TARGET for both DEM and dNBR.
-
-    crs       -- 'EPSG:326xx' (or the caller-forced projected CRS)
-    transform -- rasterio Affine, north-up, upper-left anchored (a=cell, e=-cell)
-    width     -- columns (int)
-    height    -- rows (int)
-    bounds    -- (left, bottom, right, top) in the grid CRS, UL-anchored (right/bottom = UL +/- shape*cell)
-    """
+    """The canonical 10 m analysis grid -- the reproject TARGET for both DEM and dNBR."""
     crs: str
     transform: Affine
     width: int
@@ -110,17 +71,9 @@ class GridSpec:
 def canonical_grid(west: float, south: float, east: float, north: float, *,
                    src_crs: str = "EPSG:4326", dst_crs: str | None = None,
                    cell_m: float = CELL_M) -> GridSpec:
-    """Build the 10 m canonical grid enclosing a bbox, in a metric UTM CRS.
-
-    The bbox is (west, south, east, north) in `src_crs` (lon/lat by default). If `dst_crs` is
-    None it is auto-derived from the bbox centroid via `utm_epsg` (the coordinate-frontend path).
-
-    Reprojection uses the 4 CORNER POINTS (exact inverses -> no edge bowing), taking min/max --
-    NOT rasterio.warp.transform_bounds, whose edge densification returns the outward-bowing
-    enclosing box and inflates a UTM round-trip by ~1-2% (see tests/acquire/test_acquire_grid.py). Shape
-    uses round() -- the unique rule reproducing South Fork's frozen 1439 x 966 from its bbox.
-    The grid is upper-left anchored so an arbitrary UTM corner (e.g. 426400.8) is preserved exactly.
-    """
+    """Build the 10 m canonical grid enclosing a bbox, in a metric UTM CRS (auto-derived from
+    the centroid when dst_crs is None). Corner-point reprojection + round() shape -- the frozen
+    rule that reproduces the committed South Fork grid (see tests/acquire/test_acquire_grid.py)."""
     src = _norm_epsg(src_crs)
     if dst_crs is None:
         clon, clat = (west + east) / 2.0, (south + north) / 2.0
@@ -150,13 +103,8 @@ def canonical_grid(west: float, south: float, east: float, north: float, *,
     return GridSpec(crs=dst, transform=transform, width=width, height=height, bounds=bounds)
 
 
-# ---- CF-7: DEM auto-fetch (generalizes validation/p3_acquire_dem.py) ---------------------------
-
 def tiles_for_bbox(west: float, south: float, east: float, north: float) -> list[str]:
-    """3DEP 1-degree COG tile names covering a lon/lat bbox (generalizes the single hardcoded
-    `n34w106`). A tile `n{NN}w{WWW}` covers lat [NN-1, NN] and lon [-WWW, -WWW+1] -- the US 3DEP
-    convention (northern lat, western lon). Returns e.g. ['n34w106'] for South Fork.
-    """
+    """3DEP 1-degree COG tile names covering a lon/lat bbox, e.g. ['n34w106']."""
     lat_lo = int(math.floor(min(south, north))) + 1
     lat_hi = int(math.ceil(max(south, north)))
     lonmag_lo = int(math.floor(-max(west, east))) + 1   # eastmost tile; floor()+1 (not ceil) so an exact
@@ -172,13 +120,8 @@ def tiles_for_bbox(west: float, south: float, east: float, north: float) -> list
 
 
 def fetch_dem(bbox, grid: GridSpec, out_path, *, dem_nodata: float = DEM_NODATA):
-    """Fetch USGS 3DEP 1/3" tiles over `bbox`, mosaic (windowed to the AOI), reproject bilinear onto
-    the canonical `grid`, and stage a single GeoTIFF. Fails loud on native-CRS drift or all-NoData
-    (A8), exactly as the proven single-tile `p3_acquire_dem.py` does -- generalized to N tiles.
-
-    UNITS: elevation in metres (3DEP NAVD88); transform in metres (projected grid CRS). Resampling
-    is bilinear (continuous surface; nearest would stair-step terrain).
-    """
+    """Fetch 3DEP tiles over bbox, mosaic, reproject bilinear onto the canonical grid, stage a
+    GeoTIFF. Elevation in metres. Fails loud on native-CRS drift or all-NoData (A8)."""
     west, south, east, north = bbox
     tiles = tiles_for_bbox(west, south, east, north)
     urls = ["/vsicurl/" + _3DEP_COG.format(tile=t) for t in tiles]
@@ -233,17 +176,9 @@ def fetch_dem(bbox, grid: GridSpec, out_path, *, dem_nodata: float = DEM_NODATA)
     return out_path
 
 
-# ---- CF-8: buildings auto-fetch (generalizes validation/p3_acquire_assets.py) ------------------
-
 def _buildings_to_points(gdf, dst_crs):
-    """Reduce OSM building footprints to one representative POINT each, in `dst_crs`.
-
-    The pipeline's asset layer MUST be Point geometries -- `stage_2c` reads `assets.geometry.x/.y`
-    (the validated Montecito assets are 12,221 Points). OSM `building=*` returns Polygons (plus the
-    odd node Point), so every footprint is reduced to its centroid; a building's *presence*, not its
-    outline, is what the drains-to-asset screening test (DRAINS_TO_ASSET_M) needs. Centroids are
-    computed in the projected (metric) CRS, never in lon/lat.
-    """
+    """OSM footprints -> one representative POINT each (the pipeline's asset layer must be
+    Points). Centroids computed in the projected metric CRS, never lon/lat."""
     gdf = gdf.set_crs("EPSG:4326") if gdf.crs is None else gdf
     # GPKG can't store OSM list-valued tag columns; keep geometry only (assets are presence, not attrs).
     proj = gdf[[c for c in gdf.columns if c == "geometry"]].copy().to_crs(_norm_epsg(dst_crs))
@@ -252,11 +187,8 @@ def _buildings_to_points(gdf, dst_crs):
 
 
 def fetch_buildings(bbox, dst_crs, out_path, *, buf_deg: float = 0.012):
-    """Fetch OSM building footprints over `bbox` (buffered ~1 km for edge assets) via osmnx/Overpass,
-    reproject to `dst_crs`, and stage a GeoPackage. Fails loud on 0 buildings over a populated AOI
-    (A8) -- a source/endpoint problem, not 'no assets'. Returns (out_path, n_buildings).
-    DATA_SOURCES S4: cache per fire; DRAINS_TO_ASSET_M is applied later (delineate/score), not here.
-    """
+    """Fetch OSM buildings over bbox (buffered ~1 km) via Overpass, stage a GeoPackage. Fails
+    loud on 0 buildings over a populated AOI (A8). Returns (out_path, n_buildings)."""
     import osmnx as ox   # lazy: heavy import, only paid when actually fetching
     # osmnx 2.x RAISES on an empty Overpass result (it does not return an empty gdf), so the
     # len()==0 guard below never fires on that path; the private-module import is pinned-safe
@@ -290,18 +222,10 @@ def fetch_buildings(bbox, dst_crs, out_path, *, buf_deg: float = 0.012):
     return out_path, int(len(pts))
 
 
-# ---- CF-9: dNBR raw-scale guard + A30 fire-config assembly -------------------------------------
-
 def assert_raw_dnbr(dnbr_path) -> dict:
-    """Guard (Tier-1-adjacent): the uploaded dNBR MUST be raw scale, because the pipeline's frozen bins
-    (src.config.DNBR_BIN_EDGES / DNBR_CLAMP) are defined on RAW dNBR. dNBR is physically bounded to
-    [-2, 2] (NBR = (NIR-SWIR)/(NIR+SWIR) in [-1,1]); the vault's typical raw range is ~[-0.5, 1.3]. So a
-    99th-pct |dNBR| above DNBR_RAW_MAX_ABS (=2.0) is an apparent scale error (x1000, x-N, or an RdNBR
-    upload) -> fail loud (A8); acquire NEVER silently rescales (a wrong-scale input would misclassify
-    every pixel). Obvious NoData/fill sentinels (|v| > DNBR_FILL_ABS) are SCREENED first, so an
-    UNDECLARED nodata (which read(masked=True) does NOT mask) can't false-refuse a valid raw raster.
-    Returns stats for the manifest. Raises on all-NoData / all-sentinel too.
-    """
+    """Refuse a non-raw-scale dNBR upload: the frozen bins are defined on RAW dNBR (physically
+    bounded [-2, 2]), so a 99th-pct |dNBR| above the ceiling = apparent x1000/RdNBR -> fail loud,
+    never silently rescale (A8). Fill sentinels screened first. Returns stats for the manifest."""
     try:
         with rasterio.open(dnbr_path) as ds:
             driver = ds.driver                  # GDAL sniffs CONTENT, not the .tif extension
@@ -346,10 +270,8 @@ def assert_raw_dnbr(dnbr_path) -> dict:
 
 
 def build_fire_config(bbox, dnbr_path, out_dir, name: str = "fire", *, buf_deg: float = 0.012) -> dict:
-    """Coordinate frontend seam: (bbox lon/lat + uploaded dNBR) -> staged files + the A30 `fire` dict
-    that `run_pipeline` consumes (sbs=None -> the A34 dNBR both-arms path). The dNBR scale guard runs
-    FIRST (cheap, fail-fast, before any network). Writes an acquisition manifest alongside the inputs.
-    """
+    """(bbox lon/lat + uploaded dNBR) -> staged files + the fire dict run_pipeline consumes
+    (sbs=None -> the dNBR both-arms path). Scale guard first, then fetches; writes a manifest."""
     west, south, east, north = bbox
     out_dir = Path(out_dir)
     # F7 front-door AOI cap -- cheapest check first, before even the dNBR read. A mis-drawn

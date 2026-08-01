@@ -1,22 +1,8 @@
-"""outputs.py -- write the deliverables (ranking.csv, basins.geojson, static
-map), each stamped with burn-source provenance and the screening / 'what this
-is / is not' framing. See ARCHITECTURE.md and DECISIONS A4/A11.
+"""outputs.py -- write the deliverables (ranking.csv, basins.geojson, static maps), stamped
+with burn-source provenance + the screening framing (A11).
 
-P1.6 SCOPE (behavior-preserving extract from validation/gate.py): write_outputs + the
-SCREENING_STATEMENT (A11) framing it emits, lifted VERBATIM. EXPLICIT-ARGS signature (no dict-bag):
-out_dir, dem_tif (path for the transform re-open), and burn_source (provenance, READ-ONLY) arrive as
-named args -- this module is the DAG SINK: it imports only third-party (NO project modules at all,
-A25: the per-fire output CRS is read off the DEM handle, not from config), and NEVER imports
-ingest/score/delineate/hydrology/grids/config, never re-derives or re-asserts the burn source
-(A4/A15: burn-source selection lives only in ingest). Serialization + formatting only -- it writes the
-`rank` score/delineate produced, never recomputes it. No new types (C9).
-
-PRESERVED VERBATIM (deferred items, NOT touched this phase): the vestigial hardcoded
-"drains_to_asset": True; the DEM-transform re-open (georeferences the basins.geojson polygons --
-live output, not vestigial). SCREENING_STATEMENT is byte-identical (the ethical spine in the artifact).
-
-IMPORT-TIME I/O BAN: nothing executes at module load (the geopandas/GDAL init I/O on import is the
-library's, not this module's). Writes happen only inside write_outputs.
+The DAG sink: imports only third-party; serialization only -- never recomputes a score/rank
+or re-decides the burn source.
 """
 from __future__ import annotations
 
@@ -30,27 +16,16 @@ from rasterio import features as rfeatures
 from shapely.geometry import shape as shapely_shape
 from shapely.ops import unary_union
 
-# A11 framing stamped into every artifact -- screening, never prediction. Byte-identical; do not reword.
+# The ethical spine, stamped into every artifact (A11). Byte-frozen; do not reword.
 SCREENING_STATEMENT = ("Within-fire relative screening ranking of watersheds warranting closer "
                        "assessment -- not a prediction of where debris will go. Not cross-fire comparable.")
 
-# A39 dual-rank map filename -- single source of truth so the writer and app.py's attach sites
-# (which re-derive the path independently) cannot drift apart (map-export review Fix 3).
-DUAL_RANK_MAP_NAME = "map_dual_rank.png"
+DUAL_RANK_MAP_NAME = "map_dual_rank.png"   # single source of truth; app.py re-derives this path
 
 
 def build_refusal_message(reason_code, span_m, span_threshold_m):
-    """Span-based, human-readable refusal text for an A27 terrain-applicability REFUSE.
-
-    SPAN-BASED, never modality-based (A27.1): the message cites the measured percentile span and the
-    absence of a compact depositional plain -- it makes NO mode-count / "single mode" claim (the
-    committed South Fork DEM is weakly bimodal, so a single-mode claim would be factually wrong).
-    Plain prose, no em-dashes.
-
-    reason_code      -- the detector's reason_code (assess_hypsometric_applicability).
-    span_m           -- measured valid-cell (p10 - p1) elevation span (m).
-    span_threshold_m -- the frozen A27 threshold (m), for context.
-    """
+    """Human-readable refusal text for a terrain-applicability REFUSE. Span-based, never
+    modality-based (A27.1). span_m / span_threshold_m in metres."""
     if reason_code == "REFUSED_INCISED_TERRAIN":
         return (
             f"Refused: this fire's terrain is an incised valley, not a steep range above a flat "
@@ -67,14 +42,7 @@ def build_refusal_message(reason_code, span_m, span_threshold_m):
 
 def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source,
                   validation_case="Thomas_Fire_2017/Montecito_2018"):
-    """Write {out_dir}/{ranking.csv, basins.geojson}, stamped burn_source + screening (A4/A11).
-
-    Args (explicit, from gate's call site): basins -- scored basins (rank/score/decomposition/mask/
-    flowed/matched_creek); creek_nearest -- per-creek nearest-outlet info; out_dir -- output dir path
-    (gate-owned); dem_tif -- DEM path for the transform re-open; burn_source -- provenance string
-    (read-only, from ingest via gate); validation_case -- per-fire provenance stamp (A30), defaulting
-    to the Montecito case so the no-kwarg call is byte-identical. SCREENING_STATEMENT is this module's
-    constant."""
+    """Write {out_dir}/{ranking.csv, basins.geojson}, stamped burn_source + screening framing."""
     if not basins:                                     # F9: never emit an empty artifact (A8 fail-loud)
         raise ValueError("write_outputs: refusing to write outputs for 0 basins -- the delineation "
                          "produced none; an empty ranking is indistinguishable from a broken run "
@@ -172,31 +140,18 @@ INCISED_FRAMING = (
 
 def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
                        validation_case, incised=False, subbasin_meta=None):
-    """Write {out_dir}/{ranking.csv, basins.geojson} for the dNBR BOTH-ARMS path (A34/P2.2c).
-
-    Arm A (binned) is the headline ranking (rank/score); Arm B (continuous) rides alongside
-    (rank_b/score_b) with rank_delta = |rankA - rankB| as the honest uncertainty flag. Every artifact
-    carries SCREENING_STATEMENT + the n=1 DNBR_FRAMING + burn_source=dNBR. This is the dNBR sibling of
-    write_outputs (which stays the untouched SBS single-arm writer); it recomputes no score/rank.
-
-    arm_a / arm_b -- the per-arm dicts from run_pipeline (each carries 'basins' scored + 'ranked').
-    validation_case -- REQUIRED provenance stamp (no default: a careless direct caller must not silently
-    stamp a real fire "Montecito"). creek_nearest -- per-creek nearest-outlet info, or None (a real fire
-    with no truth-creek layer).
-    out_dir -- output dir; dem_tif -- DEM path for the GeoJSON transform/CRS re-open (A25).
-    incised -- A39/A40 sub-basin path: appends intensity/intensity_rank as companion columns (rows stay
-    in frozen `rank` order), stamps INCISED_FRAMING, adds engine provenance. Default False byte-identical.
-    subbasin_meta -- WhiteboxTools engine metadata (engine/wbt_version/acc_threshold_cells/
-    breach_dist_cells), stamped into GeoJSON provenance when incised."""
+    """Write {out_dir}/{ranking.csv, basins.geojson} for the dNBR both-arms path (A34): Arm A
+    headline (rank/score), Arm B companion (rank_b/score_b), rank_delta uncertainty flag.
+    validation_case is REQUIRED (no default -- a direct caller must not silently stamp
+    "Montecito"). incised=True appends intensity companion columns + INCISED_FRAMING (A39/A40)."""
     if not arm_a["basins"]:                            # F9: never emit an empty artifact (A8 fail-loud)
         raise ValueError("write_dnbr_outputs: refusing to write outputs for 0 basins -- the "
                          "delineation produced none; an empty ranking is indistinguishable from a "
                          "broken run (A8 fail-loud).")
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "refusal.json").unlink(missing_ok=True)  # purge superseded-run debris (owner ruling)
-    (out_dir / DUAL_RANK_MAP_NAME).unlink(missing_ok=True)  # ditto: a stale incised-run map must
-    # not survive an accepted (incised=False) re-run into the same out_dir -- intensity must NEVER
-    # appear on accepted-fire output (map-export review Fix 1); regenerated fresh below if incised.
+    # Purge superseded-run debris: a stale incised map must never sit beside accepted output.
+    (out_dir / "refusal.json").unlink(missing_ok=True)
+    (out_dir / DUAL_RANK_MAP_NAME).unlink(missing_ok=True)
     b_by = {b["basin_id"]: b for b in arm_b["basins"]}
 
     nearest_by_basin = {}
@@ -296,18 +251,8 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
 
 
 def write_dual_rank_map(gj_path, dem_path, out_png, fire_label, top_n=8):
-    """Static dual-rank PNG for the incised (A39) path: two panels over a grey DEM hillshade --
-    LEFT the frozen score rank (SIZE, burn x slope x area) -- the headline, as on range-front --
-    RIGHT the intensity rank (burn x slope, the area-independent companion; A40). Rank 1 renders
-    brightest; the top-{top_n} basins of
-    each panel get numbered circular badges at their representative points.
-
-    Reads the just-written basins.geojson back (rank / intensity_rank feature properties) and
-    reprojects it to the DEM CRS so both layers draw in metric coordinates (A25: the per-fire
-    CRS comes off the DEM handle). Carries the EXPLORATORY framing: suptitle + a footer with the
-    first sentence of INCISED_FRAMING verbatim -- never wording that implies validation or
-    prediction. Deterministic (no timestamps). Agg backend, function-local matplotlib import so
-    module load stays light; the figure is closed before return. Returns out_png."""
+    """Static dual-rank PNG for the incised path (A39/A40): score-rank panel (headline) beside
+    intensity-rank panel, over a DEM hillshade, exploratory framing in the footer. Deterministic."""
     import matplotlib
     matplotlib.use("Agg")   # headless render; never a GUI backend
     import matplotlib.pyplot as plt

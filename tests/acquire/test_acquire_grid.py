@@ -1,14 +1,14 @@
-"""CF-6 (A35) -- bbox -> UTM zone + 10 m canonical grid, the reproject TARGET.
+"""bbox -> UTM zone + 10 m canonical grid, the reproject TARGET (A35).
 
-PRIMARY GATE for the whole coordinate-frontend build: the generalized `acquire.py`,
-fed South Fork's committed bbox, must reproduce the *hardcoded* South Fork canonical
-grid that `validation/p3_acquire_dem.py` froze (A24 S3) -- so every committed South
-Fork artifact (DEM, dNBR, the P3 validation) still aligns to the same grid.
+PRIMARY GATE for the acquisition layer: `acquire.py`, fed South Fork's committed bbox,
+must reproduce the South Fork canonical grid that `validation/p3_acquire_dem.py` froze
+(A24 S3) -- so every committed South Fork artifact (DEM, dNBR, its validation) still
+aligns to the same grid.
 
-Frozen grid (A24 S3, transcribed verbatim from data/southfork/dem/dem_source.json this
-session -- `stated`): CRS EPSG:32613, 966 rows x 1439 cols @ 10 m, upper-left corner
-(426400.8, 3697312.6). It was hand-anchored directly in UTM (frozen_bbox_A24), NOT
-derived from a lon/lat box -- so the exact reproduction is from the committed UTM bbox.
+Frozen grid (A24 S3, transcribed verbatim from data/southfork/dem/dem_source.json):
+CRS EPSG:32613, 966 rows x 1439 cols @ 10 m, upper-left corner (426400.8, 3697312.6).
+It was hand-anchored directly in UTM (frozen_bbox_A24), NOT derived from a lon/lat
+box -- so the exact reproduction is from the committed UTM bbox.
 
 KEY GEODESY FINDING (why corner-point min/max, not rasterio.warp.transform_bounds):
 transform_bounds densifies each edge and returns the *outward-bowing* enclosing box of

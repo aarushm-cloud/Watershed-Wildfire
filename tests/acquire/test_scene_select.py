@@ -1,4 +1,4 @@
-"""AA-1 (B4, Auto-Acquire Build-Plan Phase 1) -- deterministic scene-pair selector.
+"""The deterministic scene-pair selector (B4).
 
 Known-answer + behavior tests for scene_select.py: the pre-registered windows
 (pre <=90 d before ignition; post >= containment; green-up ceiling default +90 d,
@@ -7,12 +7,12 @@ lenient box-gate (combined pre-AND-post valid fraction over the drawn box >= 0.5
 freshness-priority selection (most-recent pre, first-clean post), the Landsat
 pair-level fallback (never a mixed-sensor pair), and the honest failure taxonomy
 (Mode B waiting / window-closed / no-pre-scene -- never a pre/pre pair, never a
-fabricated result). Values frozen by the RATIFIED pre-registration (2026-07-17);
+fabricated result). Values frozen by the auto-acquire pre-registration;
 never adjust a threshold here to make a test pass.
 
 All tests are hermetic: STAC search and mask reads are monkeypatched; masks are
 tiny synthetic numpy arrays. The live selector is verified separately against the
-Putah fire (see the Build Log), not in this suite.
+Putah fire (recorded in the vault build log), not in this suite.
 
 Run:  pytest tests/acquire/test_scene_select.py -v
 """

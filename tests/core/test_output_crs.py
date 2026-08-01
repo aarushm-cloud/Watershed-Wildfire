@@ -1,4 +1,4 @@
-"""P3.3 OUTPUT-CRS lock (A25) -- the single most dangerous site: outputs.py must label the
+"""OUTPUT-CRS lock (A25) -- the single most dangerous site: outputs.py must label the
 basins GeoDataFrame with the PER-FIRE CRS (read off the DEM the run is scoped to) BEFORE the
 WGS84 reprojection -- never the hardcoded validation-zone CANONICAL_CRS (EPSG:32611).
 
@@ -8,19 +8,18 @@ Mexico) meter-coordinates get interpreted as UTM 11N (California) and reprojecte
 hemisphere-quadrant with NO abort. A loud-failure project must not emit a confident, wrongly-placed
 ranking. This is a SILENT-WRONG defect, exactly the class the guardrails exist to catch.
 
-MECHANISM (verified on current code, P3.3): write_outputs() opens the dem_tif it is handed and
-reads s.transform off it (outputs.py:72-74); the SAME open handle exposes s.crs -- the per-fire
-decided CRS (== dem_profile["crs"], == gate.py's validated DEM CRS). The A25 fix reads s.crs there
-and uses it at the GeoDataFrame construction site (outputs.py:87) instead of CANONICAL_CRS.
+MECHANISM: write_outputs() opens the dem_tif it is handed and reads s.transform off it; the
+SAME open handle exposes s.crs -- the per-fire decided CRS (== dem_profile["crs"]). outputs.py
+reads s.crs there and uses it at the GeoDataFrame construction site instead of CANONICAL_CRS.
 
 HOW THE TEST CATCHES IT (no value-substitution): the GeoDataFrame is built and immediately
 .to_crs("EPSG:4326")'d on one chained line, so the pre-reprojection CRS is never returned. We
 therefore SPY on the gpd.GeoDataFrame constructor inside outputs and RECORD the `crs=` it is
-actually passed -- we do NOT monkeypatch the value outputs.py reads. There is no current
-crs=CANONICAL_CRS hardcode; the spy-records-not-substitutes design is what lets this catch a
-regression rather than mask one -- a revert to crs=CANONICAL_CRS would be observed, not silently
-overridden. With the A25 fix in place both fires' cases record the DEM's per-fire CRS and pass
-GREEN; the guard would go RED only if the code regressed to hardcoding 32611.
+actually passed -- we do NOT monkeypatch the value outputs.py reads. The
+spy-records-not-substitutes design is what lets this catch a regression rather than mask one --
+a revert to crs=CANONICAL_CRS would be observed, not silently overridden. Both fires' cases
+record the DEM's per-fire CRS and pass GREEN; the guard goes RED only if the code regresses to
+hardcoding 32611.
 
 Run:  pytest tests/core/test_output_crs.py -v
 """

@@ -1,10 +1,10 @@
-"""AA-2 (B4, Auto-Acquire Build-Plan Phase 2) -- the unified dNBR creator.
+"""The unified dNBR creator (B4).
 
 Known-answer + contract tests for dnbr_create.py: per-sensor SR scaling applied
 BEFORE the ratio (S2 (DN-1000)/10000 with a numeric baseline >= 04.00 assert;
 Landsat DN*0.0000275-0.2), NBR/dNBR band math on the scene's NATIVE grid (no
 reprojection in creation -- the one resample is the frozen both-arms ingest),
-SCL/QA union cloud masking to NoData (in-product, the ratified pre-reg choice),
+SCL/QA union cloud masking to NoData (in-product, the pre-registered choice),
 the identical-native-grid fail-loud guard (STOP, never resample), cross-UTM-zone
 fail-loud, and the output contract: float32 GTiff, raw scale |dNBR| <= 2, nodata
 -9999, passes acquire.assert_raw_dnbr, quicklook + provenance.json alongside.

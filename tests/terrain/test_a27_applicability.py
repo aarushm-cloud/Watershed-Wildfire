@@ -1,6 +1,6 @@
-"""A27 terrain-applicability detector -- acceptance tests (P3.4-build-1).
+"""A27 terrain-applicability detector -- acceptance tests.
 
-Covers the four acceptance groups from the build prompt:
+Four groups:
   A -- mask parity (the _valid_dem_mask extract is bit-identical on Montecito) + Montecito PROCEEDS
        + corrected coastal check (p1 is land, not ocean) + a characterization showing why land-only
        extents are load-bearing.
@@ -9,11 +9,11 @@ Covers the four acceptance groups from the build prompt:
   C -- detector + message unit tests on synthetic arrays, incl. the exact `== 50.0` boundary.
   D -- firewall tripwires (return shape, frozen constant, signature, no config override, no mutation).
 
-The behavior-lock (tests/core/test_behavior_lock.py) is intentionally NOT edited (A16: read-only oracle);
-its 7 locks are run separately and stay green after the _valid_dem_mask refactor. This file only ADDS.
+The behavior-lock (tests/core/test_behavior_lock.py) is intentionally NOT edited (A16: read-only
+oracle); its locks run separately. This file only ADDS.
 
-PINNED ORACLES captured 2026-06-29 from the unmodified pre-refactor masking (mask parity) and the
-committed inputs. Do NOT hand-edit these to make a failing change pass -- recapture deliberately.
+PINNED ORACLES captured from the unmodified pre-refactor masking (2026-06-29) and the committed
+inputs. Do NOT hand-edit these to make a failing change pass -- recapture deliberately.
 """
 from __future__ import annotations
 

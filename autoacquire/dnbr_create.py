@@ -1,40 +1,11 @@
-"""AA-2 (B4, Auto-Acquire Build-Plan Phase 2) -- the unified dNBR creator.
+"""dnbr_create.py -- the unified dNBR creator (B4): a HUMAN-APPROVED scene pair -> raw
+native-grid dNBR GeoTIFF + quicklook + provenance, gated through acquire.assert_raw_dnbr.
 
-Turns a HUMAN-APPROVED scene pair (from scene_select) into a raw native-grid dNBR
-GeoTIFF + quicklook + provenance, satisfying the existing input gate
-acquire.assert_raw_dnbr and feeding the UNCHANGED validated ingest
-(build_fire_config -> ingest_dnbr_both_arms -> run_pipeline, A34). Lives in the autoacquire/ package
-alongside scene_select.py, outside src/ (A35): a network boundary; src/ stays pure.
-
-Design frozen by the Feature Spec section 6B + the RATIFIED pre-registration
-(2026-07-17): ONE module = p2_acquire_dnbr's windowed-NATIVE-read fetch skeleton
-+ per-sensor band adapters. NO reprojection here -- the single resample in the
-whole pathway is the frozen both-arms ingest (avoids double-resample smoothing of
-the burn signal). Cross-UTM-zone fires and pre/post lattice mismatches ABORT LOUD;
-the mandated response to a grid mismatch is STOP, never resample (A8, p2 pattern).
-
-Frozen science (transcribed verbatim -- DATA_SOURCES section 2, pre-reg D, and the
-validated working code putah_dnbr.py / p2_acquire_dnbr.py; never reconstructed):
-  NBR  = (NIR - SWIR) / (NIR + SWIR)           [dimensionless surface reflectance]
-  dNBR = NBR_pre - NBR_post                    [raw scale ~ -0.5..+1.3, NEVER x1000;
-                                                positive = burned]
-  Sentinel-2: NIR = B8A (nir08), SWIR = B12 (swir22), both 20 m.
-      SR = (DN - 1000) / 10000  -- BOA_ADD_OFFSET -1000 applies to processing
-      baseline >= 04.00 (in operations since 25 Jan 2022); the baseline is ASSERTED
-      numerically (the STAC field is a string -- verified live 2026-07-17) and older
-      products fail loud: this tool screens recent fires; pre-2022 is unsupported.
-  Landsat 8/9: NIR = B5 (nir08), SWIR2 = B7 (swir22), both 30 m.
-      SR = DN * 0.0000275 - 0.2  (Collection-2 Level-2; the additive offset means a
-      ratio on raw DN is WRONG -- scale before any ratio). Fill: DN 0 / QA bit 0.
-  Masking (in-product, union of bad pixels -> NoData; RATIFIED 2026-07-17 -- a
-  knowing divergence from the p2/p3 validation lineage's fill-bit-only handling):
-      S2: SCL classes [0,1,3,6,8,9,10,11]; Landsat: QA_PIXEL bits 1-4 + fill.
-
-Output contract (already satisfied by putah/p2): single-band float32 GeoTIFF,
-RAW scale, |dNBR| <= 2 (F1 physical bound), nodata -9999, on the scene's NATIVE
-grid. The artifact is gated through acquire.assert_raw_dnbr before this function
-returns -- a gate-failing artifact raises GateAbort (fail loud, unlike putah's
-non-fatal print).
+Frozen science (transcribed from DATA_SOURCES §2 + the pre-registration; never reconstructed):
+  NBR = (NIR - SWIR) / (NIR + SWIR);  dNBR = NBR_pre - NBR_post  [raw scale, NEVER x1000].
+Per-sensor SR scalings + cloud masks live in the band adapters below. NO reprojection here --
+the single resample in the pathway is the both-arms ingest; a grid mismatch is STOP, never
+resample (A8).
 """
 
 from __future__ import annotations
@@ -73,13 +44,8 @@ _QL_NODATA_RGB = (235, 235, 235)
 
 
 def create_dnbr(pair, bbox, out_dir, *, name="fire"):
-    """Approved pair -> raw native-grid dNBR + quicklook + provenance (fail loud).
-
-    pair: {"sensor": "S2"|"Landsat", "pre": candidate, "post": candidate} -- the
-    scene_select shapes (grouped candidates supported; members mosaic first-valid-
-    wins on the shared native lattice). bbox: (W, S, E, N) lon/lat. Returns
-    {"dnbr_tif", "quicklook_png", "provenance_json", "gate_stats"}.
-    """
+    """Approved pair + bbox (lon/lat) -> raw native-grid dNBR + quicklook + provenance.
+    Returns {"dnbr_tif", "quicklook_png", "provenance_json", "gate_stats"}. Fail loud."""
     import rasterio
 
     sensor = pair["sensor"]

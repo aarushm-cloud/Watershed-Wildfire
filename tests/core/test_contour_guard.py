@@ -1,4 +1,4 @@
-"""P3.3 CONTOUR_M guard known-answer tests (A25 carve-out, council Q3).
+"""CONTOUR_M guard known-answer tests (A25 carve-out).
 
 The contour test in delineate.stage_2b_outlets keys off CONTOUR_M (config, 150 m for Montecito):
 a channel cell at elev >= CONTOUR_M whose downstream neighbour is < CONTOUR_M is a canyon mouth.

@@ -1,22 +1,8 @@
-"""delineate.py -- canyon-mouth outlet detection and upslope catchment
-delineation in INDEX mode (row, col); discard tiny catchments, keep only
-asset-draining ones, larger basins claim cells first. See ARCHITECTURE.md
-and FAILURE_MODES FM-1.
+"""delineate.py -- canyon-mouth outlet detection + upslope catchment delineation; discard
+tiny, keep asset-draining, larger basins claim cells first.
 
-P1.4 SCOPE (behavior-preserving extract from validation/gate.py stages 2b+2c): the two
-contiguous delineation functions, lifted VERBATIM. EXPLICIT-ARGS signatures (not the hydro
-bag) -- the caller (gate) unpacks hydro at the call site, so the dict-key coupling stays in
-gate, not here. Deliberately NOT here (stay in gate): scoring + mean_burn/mean_slope (2e),
-_burn_weight_raster + A18 coverage, evaluate (2f), and the whole-domain master-outlet /
-scale-free anti-collapse guard block (2a). No new types/dataclasses (C9); basins stay loose dicts.
-
-FM-1: the per-basin grid.catchment(...) runs in INDEX mode (xytype="index", x=col, y=row,
-integer coords) -- coordinate mode silently returns 0 km^2. Carried byte-for-byte, with both
-0-km^2 guards intact. The claim-order sort + shared-mask mutation are load-bearing (reordering
-silently changes which basin wins a contested cell) -- preserved exactly.
-
-IMPORT-TIME I/O BAN: nothing executes at module load except the pure-arithmetic CELL_AREA_KM2
-derivation; no filesystem access. Imports numpy + scipy.cKDTree (third-party) and config/grids.
+FM-1: grid.catchment runs in INDEX mode (xytype="index", x=col, y=row) -- coordinate mode
+silently returns 0 km^2. The claim-order sort is load-bearing.
 """
 from __future__ import annotations
 
@@ -36,64 +22,26 @@ from src.config import (
 )
 from src.grids import GateAbort, _rc_to_xy
 
-# CELL_AREA_KM2 is the P1.1 gate-local derivation, recomputed here from CELL_M (same value, no new
-# config binding): m^2 per cell -> km^2 (= 1e-4 km^2/cell). Pure arithmetic, no import-time I/O.
-CELL_AREA_KM2 = (CELL_M * CELL_M) / 1.0e6
+CELL_AREA_KM2 = (CELL_M * CELL_M) / 1.0e6   # m^2 per cell -> km^2
 
 _log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Shared valid-cell definition -- single source of truth (A27).
-# ---------------------------------------------------------------------------
 def _valid_dem_mask(dem_raw: np.ndarray, dem_nodata) -> np.ndarray:
-    """Boolean mask of valid DEM cells (finite AND != nodata). Single source of truth; both
-    assert_contour_in_dem_range and assess_hypsometric_applicability use this, so the two guards
-    can never disagree about which cells are terrain.
-
-    Definition (carried VERBATIM from the original assert_contour_in_dem_range masking, so the
-    extract is behavior-identical -- proven by the mask-parity checksum test on the Montecito DEM):
-      valid = finite cells, AND (when a nodata sentinel exists) cells != that sentinel.
-
-    dem_raw     -- raw metric DEM (m).
-    dem_nodata  -- the DEM's nodata sentinel. CRITICAL (FM-12): pysheds defaults an UNDECLARED
-                   nodata to 0, so for such a DEM this is 0 and the 0-fill cells MUST be excluded
-                   (otherwise the valid min collapses to 0). Cells == dem_nodata (and any
-                   non-finite) are excluded. Pass None only if there is genuinely no sentinel
-                   (then only non-finite cells are dropped).
-    """
+    """Valid DEM cells: finite AND != nodata. Single source of truth for every terrain guard."""
     valid = np.isfinite(dem_raw)
     if dem_nodata is not None:
-        valid &= (dem_raw != dem_nodata)        # FM-12: drop nodata-as-0 fill, never count it as terrain
+        # FM-12: pysheds defaults an undeclared nodata to 0 -- 0-fill must never count as terrain.
+        valid &= (dem_raw != dem_nodata)
     return valid
 
 
-# ---------------------------------------------------------------------------
-# A25 carve-out (council Q3) -- fail loud if CONTOUR_M is grossly mis-set for this fire's DEM.
-# ---------------------------------------------------------------------------
 def assert_contour_in_dem_range(dem_raw: np.ndarray, dem_nodata, *,
                                 contour_m: float = CONTOUR_M) -> None:
-    """Fail loud unless the mountain-front contour CONTOUR_M (m) falls inside the DEM's VALID
-    elevation range. Catches the GROSS mis-set: an entirely-wrong fire's contour for this DEM --
-    e.g. the 150 m Montecito value on South Fork's 1976-3312 m DEM (below the DEM minimum) -- which
-    would otherwise make stage_2b_outlets straddle no cell and yield zero/wrong canyon-mouth
-    outlets. Converts that one silent footgun (the per-fire CRS work does not touch it) into a
-    clear abort. Keys off `dem_raw`, the SAME raw metric array (m) stage_2b_outlets applies the
-    contour to (lines below: `dem_raw >= CONTOUR_M`), so the guard and the test see one elevation.
-
-    SCOPE (do not oversell): catches a contour OUTSIDE the DEM range only -- NOT geomorphic
-    correctness. An in-range-but-wrong contour still passes; per-fire contour tuning is out of A25
-    scope and stays a documented limitation.
-
-    dem_raw     -- raw metric DEM (m); the contour-test array.
-    dem_nodata  -- the DEM's nodata sentinel. CRITICAL (FM-12): pysheds defaults an UNDECLARED
-                   nodata to 0, so for such a DEM this is 0 and the 0-fill cells MUST be excluded --
-                   otherwise the valid min collapses to 0, `0 <= contour <= max` is trivially true,
-                   and the guard silently never fires (the guard-killing trap). Cells == dem_nodata
-                   (and any non-finite) are excluded from the min/max. Pass None only if there is
-                   genuinely no sentinel (then only non-finite cells are dropped).
-    """
-    valid = _valid_dem_mask(dem_raw, dem_nodata)   # shared single-source definition (A27); same cells as before
+    """Fail loud unless the contour (m) falls inside the DEM's VALID elevation range (A25).
+    Catches a wrong-fire contour only, not geomorphic correctness. Range over valid cells --
+    counting nodata-as-0 fill would make the check trivially pass (FM-12)."""
+    valid = _valid_dem_mask(dem_raw, dem_nodata)
     if not valid.any():
         raise GateAbort("CONTOUR_M guard: DEM has no valid (non-nodata) cells -- cannot range-check "
                         "the contour (FM-10).")
@@ -106,41 +54,13 @@ def assert_contour_in_dem_range(dem_raw: np.ndarray, dem_nodata, *,
             f"zero/wrong canyon-mouth outlets). Set CONTOUR_M for this fire. (A25 carve-out)")
 
 
-# ---------------------------------------------------------------------------
-# A27 -- terrain-applicability refusal trigger (frozen hypsometric-span rule).
-# DECISIONS.md A27 / A27.1. The 50 m constant is pre-registered and FROZEN: never tuned, never
-# per-fire, no parameter, no config.py override. The detector reads only WHETHER a contour is
-# well-posed (a boolean over the hypsometry span); it returns NO absolute-elevation/contour value
-# and consumes none -- that firewall line is what keeps A27 off the category-two scoring fence.
-# ---------------------------------------------------------------------------
 HYPSOMETRIC_SPAN_THRESHOLD_M = 50.0  # A27-frozen; never tuned, never per-fire, no override
 
 
 def assess_hypsometric_applicability(dem_raw: np.ndarray, dem_nodata) -> dict:
-    """A27 terrain-applicability pre-check (frozen hypsometric-span rule).
-
-    REFUSE iff `(p10 - p1) > HYPSOMETRIC_SPAN_THRESHOLD_M` on valid (nodata-masked, finite) DEM
-    elevation, where p1, p10 are the 1st and 10th percentiles of valid-cell elevation (m). A wide
-    low tail (`p10 - p1` large) = an incised valley floor with no compact depositional plain; a
-    true range-front-over-plain compresses p1->p10 to ~20-30 m (DECISIONS A27).
-
-    FIREWALL (A27): this function reads WHETHER the contour-anchoring is well-posed, never WHAT
-    contour VALUE to use. It emits NO absolute percentile elevation and consumes none. p1/p10 are
-    computed, LOGGED, and discarded -- they are never returned, never stashed on a global/attribute.
-    `span_m = p10 - p1` is a difference (a vertical extent), the only elevation-derived number that
-    leaves the function; an absolute percentile elevation must not. Returns EXACTLY
-    `{refuse, reason_code, span_m, span_threshold_m, n_valid}` -- no p1_m/p10_m, no contour-like key.
-
-    On refuse=True the verdict now ROUTES rather than refuses (A39): canyon-mouth anchoring is
-    ill-posed here -- the scored basins would be the upslope catchments of CONTOUR_M-anchored
-    outlets (delineate.py outlets -> basins -> scores), an anchor incised terrain cannot define
-    (A27.1) -- so the caller (src.pipeline._terrain_mode) selects the WhiteboxTools sub-basin
-    engine instead. The refusal-writing machinery (write_refusal) is removed; this function only
-    classifies.
-
-    dem_raw     -- raw metric DEM (m); read-only (a fancy-index copy is taken, never mutated).
-    dem_nodata  -- the DEM's nodata sentinel (see _valid_dem_mask; FM-12).
-    """
+    """A27 terrain pre-check: refuse iff valid-cell (p10 - p1) span (m) > the frozen 50 m threshold.
+    FIREWALL: classifies only -- returns no absolute elevation, no contour value. On refuse the
+    caller ROUTES to the WBT sub-basin engine (A39)."""
     valid = _valid_dem_mask(dem_raw, dem_nodata)
     vals = dem_raw[valid]                         # fancy-index COPY (m); dem_raw is never mutated
     n_valid = int(vals.size)
@@ -172,19 +92,9 @@ def assess_hypsometric_applicability(dem_raw: np.ndarray, dem_nodata) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# 2b -- canyon-mouth outlets
-# ---------------------------------------------------------------------------
 def stage_2b_outlets(acc, fdir, dem_raw, shape, *, contour_m: float = CONTOUR_M) -> list[tuple[int, int]]:
-    """Channel cells (acc > threshold) that cross the CONTOUR_M mountain-front contour going downhill.
-
-    A channel cell with raw elevation >= CONTOUR_M whose D8-downstream neighbour's raw
-    elevation is < CONTOUR_M is a canyon-mouth outlet (VALIDATION_REPORT s3.2). Contour
-    test on RAW terrain; routing on conditioned-DEM fdir. Returns (row, col) tuples.
-
-    Args (explicit, from hydro at the gate call site): acc -- flow-accumulation array;
-    fdir -- flow-direction ARRAY (np.asarray(fdir); for the integer fdir[r,c] lookup);
-    dem_raw -- raw metric DEM (m); shape -- (nrows, ncols)."""
+    """Canyon-mouth outlets: channel cells (acc > threshold) crossing the contour (m) going
+    downhill. Contour test on RAW terrain; routing on conditioned-DEM fdir. Returns (row, col)s."""
     nrows, ncols = shape
     channel = acc > ACC_THRESHOLD_CELLS
 
@@ -204,24 +114,9 @@ def stage_2b_outlets(acc, fdir, dem_raw, shape, *, contour_m: float = CONTOUR_M)
     return sorted(outlets)  # stable order
 
 
-# ---------------------------------------------------------------------------
-# 2c -- delineate, discard, drains-to-asset, dedup (DETERMINISTIC)
-# ---------------------------------------------------------------------------
 def stage_2c_delineate(grid, acc, fdir_raster, transform, shape, outlets, asset_xy):
-    """Delineate, discard tiny, keep asset-draining, dedup (larger basins claim first).
-
-    Order (an operational choice; report lists these as prose, s3.3): delineate ->
-    discard raw < MIN_BASIN_KM2 -> drains-to-asset (basin CHANNEL cells -> nearest asset
-    <= 600 m, "channel reaches within 600 m of the building layer") -> dedup -> re-discard.
-
-    Determinism: dedup ties break by (-area, row, col); basin_id assigned by sorting the
-    surviving basins on outlet (row, col). Geometry is unchanged from Part 1 (no exact
-    area ties exist with float areas; the keys only canonicalise label/claim order).
-
-    Args (explicit, from hydro at the gate call site): grid -- pysheds Grid; acc -- accumulation
-    array; fdir_raster -- flow-direction pysheds RASTER (for grid.catchment); transform -- affine;
-    shape -- (nrows, ncols); outlets -- (row,col) list from stage_2b_outlets; asset_xy -- Nx2
-    asset coords (m)."""
+    """Delineate per outlet, discard < MIN_BASIN_KM2, keep asset-draining (<= 600 m), dedup
+    (larger basins claim cells first; deterministic tie-breaks)."""
     channel = acc > ACC_THRESHOLD_CELLS
     asset_tree = cKDTree(asset_xy)
 

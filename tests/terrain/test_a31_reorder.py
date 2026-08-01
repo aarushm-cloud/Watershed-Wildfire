@@ -1,7 +1,7 @@
-"""A31 REORDER + South Fork wiring tests.
+"""A31 ORDERING + South Fork wiring tests.
 
-A31 moves the terrain-classification router AHEAD of stage_2a_hydrology in run_pipeline, so a fire
-is classified on the raw DEM ALONE -- before any SBS is opened or hydrology runs. This file locks
+The terrain router runs AHEAD of stage_2a_hydrology in run_pipeline (A31), so a fire is
+classified on the raw DEM ALONE -- before any SBS is opened or hydrology runs. This file locks
 DISTINCT outcomes of the input-shape matrix (do not conflate them):
 
   1. INCISED-RANKS (incised DEM, sbs=None) -> run_pipeline ROUTES (A39) to a ranked-result, WITHOUT

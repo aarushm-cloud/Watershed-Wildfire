@@ -1,32 +1,10 @@
-"""gate.py -- the Week-0 validation gate, reconstructed in P0.5 from
-VALIDATION_REPORT.md (the behavior oracle) using the same data sources and
-parameters. Reproduces the ranking ORDER + both pre-registered pass criteria
-(top-tercile 6/6, #1 = Cold Spring, flowed); the reconstruction lands at 36
-basins / rank-AUC 0.9722 / 44.73 km2 master outlet -- the AOI-shift findings the
-behavior lock anchors on, NOT the report's documented 32 / 0.987 / 39.19 (see
-tests/core/test_behavior_lock.py). Not to be edited to make a run pass. See DECISIONS A16.
+"""gate.py -- the reconstructed Week-0 validation gate: the behavior oracle. Reproduces the
+ranking order + both pass criteria (6/6 top-tercile, #1 Cold Spring); lands at 36 basins /
+AUC 0.9722 / 44.73 km2 master (AOI-shift findings) vs the report's 32 / 0.987 / 39.19 --
+see tests/core/test_behavior_lock.py. NEVER edited to make a run pass (A16).
 
-The PIPELINE itself (run_pipeline + the stage wiring + the A27/A31 refusal +
-MONTECITO_FIRE/SOUTHFORK_FIRE + the reconstruction I/O anchors) was PROMOTED verbatim
-into src/pipeline.py (behavior-neutral import churn); this module now re-exports those
-names (backward-compat shim) so `gate.run_pipeline` / `from validation.gate import ...`
-call sites are unchanged, and keeps ONLY the validation-report HARNESS (main() + its
-perturbation/determinism helpers) -- the part that is validation-specific, not pipeline.
-
-Sub-stages, single script (P1 modularised into src/):
-  2a hydrology  -- pysheds fill pits -> fill depressions -> resolve flats ->
-                   D8 flow dir -> accumulation; inline master-outlet FM-1 check
-  2b outlets    -- channel cells (acc > thresh) crossing the CONTOUR_M mountain-front
-                   contour going downhill (canyon mouths)
-  2c delineate  -- upslope catchment per outlet (INDEX mode); discard tiny; keep
-                   asset-draining; dedup (larger basins claim cells first).
-                   Deterministic: stable basin_id + tie-breaks by outlet (row,col).
-  2d slope      -- mean_slope = tan(theta) (OWNER-CONFIRMED), raw metric DEM
-  2e score+rank -- mean_burn x mean_slope x area_km2; within-fire ordinal rank
-  2f truth+metrics -- creek->outlet match (<=250 m); tercile; rank-AUC; means
-Outputs: validation/out/{ranking.csv, basins.geojson}, stamped SBS + screening.
-
-All distances are metric (EPSG:32611, UTM 11N). Fail loud, never degrade (FM-10).
+The pipeline itself lives in src/pipeline.py; this module re-exports those names and keeps
+only the validation-report harness (main() + perturbation/determinism helpers).
 """
 
 from __future__ import annotations

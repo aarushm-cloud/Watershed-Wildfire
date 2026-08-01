@@ -1,9 +1,8 @@
-"""CF-11 -- pyflwdir independent-engine cross-check, locked as a confidence test.
+"""pyflwdir independent-engine cross-check, locked as a confidence test.
 
-F10: this file used to be a SINGLE test gated `skipif(DEM absent)` -- and the Montecito DEM is
-gitignored, so on a clean checkout / CI runner it skipped and the suite went green having NEVER run
-the independent-engine check (a pyflwdir break or a crosscheck() regression would not be caught).
-Split into two:
+Two lanes (F10) -- a single skipif(DEM absent) test would silently skip on a clean checkout
+(the Montecito DEM is gitignored) and the suite would go green having NEVER run the
+independent-engine check:
 
   * test_pyflwdir_engine_runs_hermetically -- a HERMETIC smoke test (tiny synthetic DEM, no external
     data) that ALWAYS runs. A HARD `import pyflwdir` means a broken/renamed engine errors loudly here

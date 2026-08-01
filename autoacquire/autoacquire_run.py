@@ -1,20 +1,8 @@
-"""AA-3 (B4, Auto-Acquire Build-Plan Phase 3) -- thin wiring into the validated pipeline.
+"""autoacquire_run.py -- thin wiring: scene_select.select -> [HUMAN APPROVAL GATE] ->
+dnbr_create.create_dnbr -> acquire.build_fire_config -> run_pipeline.
 
-Composes the auto-acquire pathway end-to-end:
-
-    scene_select.select  ->  [HUMAN APPROVAL GATE]  ->  dnbr_create.create_dnbr
-        ->  acquire.build_fire_config  ->  src.pipeline.run_pipeline
-
-No new ingest code and no new science: the created raw dNBR converges with the
-upload path at the UNCHANGED acquire.assert_raw_dnbr / ingest_dnbr_both_arms seam
-(A34) -- the single resample in the pathway is the frozen both-arms ingest.
-
-The approval gate defaults CLOSED: machine proposes, human disposes (Feature Spec
-section 7). approve=True is the explicit, logged approval of the recommended pair
-(the Phase-4 UI captures it with a button; this CLI captures it with --approve).
-Honest selector states (waiting / window_closed / no_pre_scene) pass through
-untouched -- nothing is built, and per B1 no score or rank of any kind exists in
-those states. A pipeline refusal is returned verbatim, never softened (FM-10).
+The approval gate defaults CLOSED (machine proposes, human disposes); honest selector states
+pass through untouched with nothing built; a pipeline refusal is returned verbatim.
 """
 
 from __future__ import annotations
@@ -34,14 +22,8 @@ from src import outputs, pipeline  # noqa: E402
 def run_autoacquire(bbox, *, ignition, containment, out_dir, name="fire",
                     greenup_days=scene_select.GREENUP_DEFAULT_DAYS,
                     approve=False, today=None):
-    """bbox + dates -> recommendation package (default) or, on explicit approval,
-    the full ranked/refused pipeline result.
-
-    Returns the selector's honest state dict unchanged when no clean pair exists,
-    the recommendation package when approve is False (the human decides next), or
-    {"status": "ran", "package", "created", "pipeline"} after an approved build.
-    All calls go through module attributes (monkeypatchable, suite convention).
-    """
+    """bbox + dates -> recommendation package (default), or the full pipeline result on
+    explicit approval. Honest selector states pass through unchanged."""
     package = scene_select.select(
         bbox, ignition=ignition, containment=containment,
         greenup_days=greenup_days, today=today,

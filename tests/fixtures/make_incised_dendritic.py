@@ -17,7 +17,7 @@ tributary notches alternating left/right off the trunk (a simple dendritic patte
 segmentation has real confluences to split on. Fully analytic, NO randomness, so the written
 GeoTIFF is byte-reproducible and its SHA256 is stable.
 
-Validated by the controller (A39 Task 8 fixture recipe) at the frozen thresholds:
+Validated at the frozen thresholds (A39):
   incised detection: refuse=True, span_m ~= 132 m (> the frozen 50 m HYPSOMETRIC_SPAN_THRESHOLD_M)
   segment_subbasins (frozen SUBBASIN_ACC_THRESHOLD_CELLS=3000) -> 23 raw sub-basins
   build_geometry_records -> 9 phase-1 records (>= MIN_BASIN_KM2, interior only)

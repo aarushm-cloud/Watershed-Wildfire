@@ -1,13 +1,13 @@
-"""THE FIREWALL FUSE (P2.2b verification §0) -- assert the code's frozen dNBR constants
-equal the P2.1/A20 pre-registration values, byte-for-byte.
+"""THE FIREWALL FUSE -- assert the code's frozen dNBR constants equal the A20
+pre-registration values, byte-for-byte.
 
 WHY THIS TEST EXISTS (the under-weighted catch): the firewall (validation/reports/P2_PREREGISTRATION.md,
-ADR A20) froze the dNBR bin edges, the Arm-B clamp, and the 0.1 floor in a *document*. Until this
-test existed, NOTHING checked that the *code* matched. A transcription slip -- `0.27 -> 0.207`, or
+ADR A20) froze the dNBR bin edges, the Arm-B clamp, and the 0.1 floor in a *document* -- without
+this fuse, nothing checks that the *code* matches. A transcription slip -- `0.27 -> 0.207`, or
 a clamp upper `1.3 -> 1.03` -- passes every other check: it still produces a ranking, the basin set
-still matches, the coverage checksum still holds. It would silently corrupt the P2.3 agreement test
-while looking completely healthy. This test is the missing fuse: it ties the code's literals to the
-frozen pre-registration so a slip fails loudly here, first.
+still matches, the coverage checksum still holds; it would silently corrupt the arm-agreement
+checks while looking completely healthy. This fuse ties the code's literals to the frozen
+pre-registration so a slip fails loudly here, first.
 
 These values are TRANSCRIBED VERBATIM from validation/reports/P2_PREREGISTRATION.md:
   - §2 / §8.1  Arm A binning edges (raw dNBR): -0.5, [0.100, 0.270, 0.440, 0.660], 1.300

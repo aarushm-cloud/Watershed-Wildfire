@@ -1,14 +1,14 @@
-"""P2.2b dNBR-arm KNOWN-ANSWER tests -- the real defense (CLAUDE.md epistemic guardrails).
+"""dNBR-arm KNOWN-ANSWER tests -- the real defense (CLAUDE.md epistemic guardrails).
 
 A reference fixes RECALL errors (wrong coefficient); only a check against a known OUTPUT catches
 APPLICATION errors (right equation, wrong-unit input, off-by-one bin edge, NaN slipping a threshold).
-So every frozen rule in P2.1 §2/§3/§4 gets a hand-computed expected value here.
+So every frozen rule in the dNBR pre-registration (§2/§3/§4) gets a hand-computed expected value here.
 
 Two layers:
   1. PURE normalization known-answers (hermetic, hand-built rasters) -- Arm A binning + 5->4 collapse,
      Arm B continuous transfer, the shared 0.1 floor, and the NaN/invalid -> class-15 routing that the
      pre-registration flags as the silent-wrong defect ("NaN < 0.100 is False").
-  2. INTEGRATION on the real P2.0 native raster -- reproject snaps to the DEM grid (assert_aligned
+  2. INTEGRATION on the committed native raster -- reproject snaps to the DEM grid (assert_aligned
      passes), Arm A (nearest) and Arm B (bilinear) share a byte-identical valid footprint, and no
      NaN/sentinel survives into either arm's normalization.
 

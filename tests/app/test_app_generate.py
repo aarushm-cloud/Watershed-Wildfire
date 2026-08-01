@@ -1,4 +1,4 @@
-"""AA-4 (B4, Auto-Acquire Build-Plan Phase 4) -- the Generate-from-dates approval UI.
+"""The Generate-from-dates approval UI (B4).
 
 Pure-helper + AppTest coverage for app.py's auto-acquire mode: generate_package's F5
 error reduction, the deterministic scorecard view (cloud-over-fire headline, tile-cloud

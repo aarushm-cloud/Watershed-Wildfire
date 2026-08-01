@@ -1,4 +1,4 @@
-"""CF-12 (A36 build) -- hypothesis property tests locking the FROZEN scoring stage.
+"""Hypothesis property tests locking the FROZEN scoring stage.
 
 These are invariant/regression tests over `src.score.stage_2e_score` (the frozen
 `score = mean_burn x mean_slope x area_km2` + within-fire ordinal rank). Unlike the

@@ -1,14 +1,14 @@
-"""P1 BEHAVIOR LOCK -- the executable oracle for the Phase-1 refactor.
+"""BEHAVIOR LOCK -- the executable oracle for the pipeline.
 
 These assertions freeze the OBSERVABLE BEHAVIOR of the reconstructed
-`validation/gate.py` so that the P1 refactor (monolith -> seven `src/` modules)
-can be proven behavior-preserving. If a refactor changes any value locked here,
+`validation/gate.py` so that ANY refactor of the pipeline can be proven
+behavior-preserving. If a refactor changes any value locked here,
 THE REFACTOR IS WRONG -- this file is NEVER edited to make a failing refactor pass
 (DECISIONS A16: the gate + report are read-only behavior anchors).
 
-CAPTURED: 2026-06-10, from the unmodified reconstructed `validation/gate.py`
-  (committed at P0.5; A17 coverage-weighted mean_burn treatment).
-STRATEGY: A (live run). `gate.run_pipeline()` is a clean importable entrypoint,
+CAPTURED from the unmodified reconstructed `validation/gate.py` (2026-06-10;
+  A17 coverage-weighted mean_burn treatment).
+STRATEGY: live run. `gate.run_pipeline()` is a clean importable entrypoint,
   reads only LOCAL cached inputs under `validation/data/` (no network), has NO
   file-side-effects (only `main()` writes outputs), is deterministic (the gate's
   own end-to-end determinism check passes), and runs in ~2s. So the lock runs the
@@ -19,16 +19,15 @@ WHY THESE VALUES DIVERGE FROM THE REPORT (read before "fixing" them):
   reconstructed gate reproduces the *ranked order* and both pre-registered pass
   criteria (6/6 flowed in top tercile, #1 = Cold Spring) but, because the original
   AOI is unrecoverable, lands at AUC 0.9722 and master outlet 44.73 km^2. Those are
-  the gate's REAL outputs and are recorded as P0.5 findings (PASS-WITH-FINDINGS),
+  the gate's REAL outputs, recorded as PASS-WITH-FINDINGS reconstruction findings,
   NOT tuned toward 0.987. This lock therefore anchors on what the gate PRODUCES
   (44.73, 0.9722), not on the documented report numbers. See the vault note
   "P0.5 -- Gate Reconstruction Findings" and DECISIONS A16/A17.
 
-COVERAGE LOCK added 2026-06-10 (POST-fix, reviewed values). The original oracle did NOT assert
-  `low_coverage`, which is precisely why the masked-basin bug (C8/A18) could exist silently: a
-  100%-Developed basin read `low_coverage=False` ("fully assessed, low hazard") while scoring
-  0.0. The A18 fix redefined coverage as SBS class in {1,2,3,4} (a real burn assessment),
-  flipping b3/b13 False->True with the ranking bit-identical. This lock freezes the CORRECTED
+COVERAGE LOCK (A18): the oracle asserts `low_coverage` BECAUSE its absence is precisely how
+  the masked-basin bug (C8/A18) could exist silently: a 100%-Developed basin read
+  `low_coverage=False` ("fully assessed, low hazard") while scoring 0.0. A18 defines
+  coverage as SBS class in {1,2,3,4} (a real burn assessment). This lock freezes the
   per-basin `low_coverage` bool (26 True / 10 False), reviewed against the before/after table.
   CAVEAT: `low_coverage=True` currently CONFLATES "outside burn footprint" (NoData class 15) and
   "masked developed land" (class 0) -- both map to True. That conflation is the present contract,

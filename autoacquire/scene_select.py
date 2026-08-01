@@ -1,29 +1,12 @@
-"""AA-1 (B4, Auto-Acquire Build-Plan Phase 1) -- deterministic scene-pair selector.
+"""scene_select.py -- deterministic scene-pair selector (B4): bbox + fire dates -> a
+recommended clean pre/post pair + ranked alternatives + audit trail. No LLM anywhere in this
+path; a HUMAN approves the pair before any dNBR is built.
 
-Turns a drawn bbox + ignition/containment dates into a recommended clean pre/post
-satellite scene pair (plus ranked alternatives + audit trail) for the auto-acquire
-dNBR pathway. Pure structured optimization -- no LLM anywhere in this path (Feature
-Spec section 9). The pair is proposed; a HUMAN approves it before any dNBR is built.
+Every threshold below is FROZEN by the auto-acquire pre-registration (vault). Never tune one
+to make a run pass.
 
-Lives in the autoacquire/ package, outside src/ (A35 pattern): this module is a
-NETWORK boundary; src/ stays a pure no-network seam. All network seams are module-level functions
-(_search_scenes, _candidate_valid_mask) so tests monkeypatch them (suite convention).
-
-Every threshold below is FROZEN by the ratified pre-registration (vault:
-"Auto-Acquire dNBR Pathway -- Pre-Registration", RATIFIED 2026-07-17). Never tune
-one to make a run pass -- changing any value re-opens the pre-registration (Tier-1).
-
-Honesty note (science guardrail section 0): no published external operational
-cloud-fraction threshold exists for this gate; the 0.50 floor is DERIVED from the
-pipeline's own frozen per-basin guard (DNBR_NODATA_FAILLOUD_FRAC = 0.20 -- a flowed
-basin needs >= 80% valid), stated here rather than asserted as a literature value.
-
-Failure taxonomy (fail loud, never fabricate -- A8/FM-10, the Elephant lesson):
-  status='recommended'   clean pair found; human approval is the next gate.
-  status='waiting'       Mode B: no clean post-scene YET (never differences pre/pre).
-  status='window_closed' green-up ceiling passed without a clean post-scene.
-  status='no_pre_scene'  no clean pre-scene within the 90 d archive window (rare).
-  GateAbort              infrastructure/contract failure (STAC down, grid mismatch).
+Statuses: recommended | waiting (no clean post YET; never pre/pre) | window_closed |
+no_pre_scene; GateAbort = infrastructure failure.
 """
 
 from __future__ import annotations
@@ -41,11 +24,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.grids import GateAbort  # noqa: E402  (A8 fail-loud contract, same as acquire.py)
 
-# ---------------------------------------------------------------------------
-# Frozen pre-registration values (RATIFIED 2026-07-17). Tags per the pre-reg:
-# [ADOPT] published convention verbatim / [DERIVE] from a frozen quantity /
-# [BOUND] conservative worst-case bound.
-# ---------------------------------------------------------------------------
+# --- frozen pre-registration values ([ADOPT] published / [DERIVE]d / [BOUND] conservative) ---
 
 PRE_WINDOW_DAYS = 90          # [BOUND] pre = most-recent clean scene <= 90 d before ignition
 GREENUP_DEFAULT_DAYS = 90     # [ADOPT+BOUND] post ceiling default: containment + 90 d
@@ -104,12 +83,8 @@ ETA_CAVEAT = (
 
 
 def derive_windows(*, ignition, containment, today, greenup_days=GREENUP_DEFAULT_DAYS):
-    """Pre/post search windows from the fire dates (all datetime.date, half-open ends).
-
-    pre  = [ignition - 90 d, ignition)              -- scene must strictly predate ignition
-    post = [containment, containment + greenup_days] -- first clean scene wins (initial
-           assessment, BAER convention); the green-up ceiling bounds the poll.
-    """
+    """Pre/post search windows: pre = [ignition - 90 d, ignition), post = [containment,
+    containment + greenup_days]. All datetime.date."""
     if not (0 < greenup_days <= GREENUP_MAX_DAYS):
         raise GateAbort(
             f"green-up ceiling override {greenup_days} d is outside (0, {GREENUP_MAX_DAYS}] -- "
@@ -137,12 +112,8 @@ def derive_windows(*, ignition, containment, today, greenup_days=GREENUP_DEFAULT
 
 
 def coarse_filter(candidates, bbox, *, window):
-    """Drop candidates on metadata alone: out-of-window date, partial-AOI footprint,
-    tile-cloud > 80%. Returns (survivors, [(candidate, reason), ...]).
-
-    window is half-open [start, end). A mixed-sensor pool is a caller bug -> GateAbort
-    (pairs are internally one sensor, A2/A3; the pools are built per sensor).
-    """
+    """Drop candidates on metadata alone (window, footprint, tile-cloud > 80%). Returns
+    (survivors, [(candidate, reason), ...]); a mixed-sensor pool -> GateAbort."""
     from shapely.geometry import box as _box, shape as _shape
 
     sensors = {c["sensor"] for c in candidates}
@@ -196,14 +167,8 @@ def landsat_valid_mask(qa):
 
 
 def pair_metrics(pre_valid, post_valid):
-    """Combined-pair statistics over the drawn box. The decisive number is the
-    INTERSECTION valid fraction (two scenes each 90% clean but cloudy in different
-    places can still fail) -- never each scene alone, never averaged.
-
-    Shape slop up to _MAX_GRID_SLOP_PX per axis is trimmed (fraction statistic only;
-    the creator's band math has its own strict same-grid guard). Larger mismatch is
-    a grid contract violation -> GateAbort.
-    """
+    """Combined-pair statistics over the drawn box; the decisive number is the INTERSECTION
+    valid fraction -- never each scene alone, never averaged."""
     if pre_valid.shape != post_valid.shape:
         dr = abs(pre_valid.shape[0] - post_valid.shape[0])
         dc = abs(pre_valid.shape[1] - post_valid.shape[1])
@@ -236,12 +201,8 @@ def passes_box_gate(pair_valid_frac):
 
 
 def rubric_verdict(pair_valid_frac, scene_cloud_fracs):
-    """Good/OK/Marginal/Below-bar verdict from the frozen rubric bands (pre-reg C).
-
-    Two axes -- pair-valid fraction and worst per-scene cloud-over-AOI fraction --
-    and the verdict is the WORSE of the two, never blended (the B1 anti-composite
-    ethos). Identical metrics always yield the identical verdict + prose.
-    """
+    """Good/OK/Marginal/Below-bar from the frozen rubric bands; the verdict is the WORSE of
+    the two axes, never blended. Deterministic: identical metrics -> identical prose."""
     worst_cloud = max(scene_cloud_fracs) if scene_cloud_fracs else 0.0
     if pair_valid_frac >= RUBRIC_GOOD_PAIR:
         pair_band = "good"
@@ -281,16 +242,8 @@ def rubric_verdict(pair_valid_frac, scene_cloud_fracs):
 
 
 def group_candidates(items):
-    """Merge same-sensor, same-day STAC items (adjacent tiles of one overpass) into
-    ONE candidate, so a fire spanning two tiles in a UTM zone is not false-dead-ended
-    by per-tile partial-footprint rejects (spec 6B: native-grid mosaic works within a
-    zone; cross-zone fails loud at mask-read time).
-
-    Group fields: footprint = union of member footprints; tile_cloud_pct = MIN member
-    value (lenient on purpose -- a cloudy neighbor tile barely touching the AOI must
-    not veto the group; the decisive gate reads actual pixels); processing_baseline =
-    numeric MIN (worst case, what the creator's assert cares about).
-    """
+    """Merge same-sensor same-day STAC items (adjacent tiles of one overpass) into ONE
+    candidate: footprint = union, tile_cloud_pct = min member, baseline = numeric min."""
     from shapely.geometry import mapping as _mapping, shape as _shape
     from shapely.ops import unary_union
 
@@ -323,8 +276,8 @@ def group_candidates(items):
 
 
 def _baseline_num(b):
-    """Numeric processing baseline ('05.12' -> 5.12). STRING compare would be wrong
-    (verified live 2026-07-17: earth-search serves the field as a string)."""
+    """Numeric processing baseline ('05.12' -> 5.12). earth-search serves the field as a
+    STRING, so a string compare would be wrong."""
     try:
         return float(b)
     except (TypeError, ValueError):
@@ -332,11 +285,8 @@ def _baseline_num(b):
 
 
 def s2_baseline_eligible(baseline) -> bool:
-    """True iff an S2 member meets the frozen >= 04.00 floor (F-1 seam close).
-
-    Mirrors dnbr_create._assert_s2_baseline exactly, including its treatment of an
-    ABSENT baseline as ineligible -- a scene this returns False for would abort the
-    build after human approval, so it must never enter the candidate pool."""
+    """True iff an S2 member meets the frozen >= 04.00 baseline floor. Mirrors the creator's
+    assert exactly -- a scene the creator would abort on must never enter the pool."""
     num = _baseline_num(baseline)
     return num is not None and num >= S2_MIN_BASELINE
 
@@ -347,13 +297,8 @@ def s2_baseline_eligible(baseline) -> bool:
 
 
 def _search_scenes(sensor, bbox, d0, d1):
-    """STAC search -> candidate dicts for one sensor over [d0, d1) (dates).
-
-    Candidate shape: {id, sensor, date, tile_cloud_pct, footprint, processing_baseline,
-    assets}. S2 via Earth Search v1 (sentinel-2-l2a); Landsat 8/9 via Microsoft
-    Planetary Computer (landsat-c2-l2, token-free; asset hrefs are SAS-signed at
-    read time). Network failure -> GateAbort (A8), never a silent empty pool.
-    """
+    """STAC search -> candidate dicts for one sensor over [d0, d1). S2 via Earth Search;
+    Landsat via Planetary Computer. Network failure -> GateAbort, never a silent empty pool."""
     import requests
 
     if sensor == "S2":
@@ -412,16 +357,9 @@ def _search_scenes(sensor, bbox, d0, d1):
 
 
 def _candidate_valid_mask(candidate, bbox):
-    """Windowed cloud-mask read over the drawn box -> bool valid mask.
-
-    S2: SCL asset (20 m, uint8 classes). Landsat: QA_PIXEL (30 m, uint16 bits),
-    SAS-signed first. Grouped candidates (same-day adjacent tiles) are read
-    boundless per member and OR-merged: a pixel is valid if ANY member tile sees
-    it cleanly (first-valid-wins mosaic semantics; boundless fill = the sensor's
-    nodata/fill code, so uncovered pixels stay invalid). Cross-UTM-zone groups
-    fail loud (spec 6B, v1). This feeds the GATE FRACTION only -- band math in
-    the creator does its own strict windowed reads (Phase 2). Failure -> GateAbort.
-    """
+    """Windowed cloud-mask read over the drawn box -> bool valid mask (S2 SCL / Landsat
+    QA_PIXEL; grouped tiles OR-merged; cross-UTM-zone fails loud). Gate fraction only --
+    the creator's band math does its own strict reads."""
     members = candidate.get("items") or [candidate]
     epsgs = {m.get("epsg") for m in members if m.get("epsg") is not None}
     if len(epsgs) > 1:
@@ -548,13 +486,9 @@ def _pair_zone_ok(pre, post):
 
 
 def select(bbox, *, ignition, containment, today=None, greenup_days=GREENUP_DEFAULT_DAYS):
-    """The deterministic selector: bbox + dates -> recommendation package or an honest
-    failure state. Sentinel-2 first, Landsat pair-level fallback, never mixed (A2/A3).
-
-    Deterministic given the same scene pool + constants: pre = most-recent gate-passing
-    scene, post = FIRST gate-passing scene at/after containment (freshness priority,
-    initial-assessment framing). `today` is injectable for reproducibility/tests.
-    """
+    """The deterministic selector: bbox + dates -> recommendation package or an honest failure
+    state. S2 first, Landsat pair-level fallback, never mixed; pre = most-recent clean,
+    post = first clean. `today` injectable for tests."""
     today = today if today is not None else date.today()
     windows = derive_windows(
         ignition=ignition, containment=containment, today=today, greenup_days=greenup_days
@@ -796,13 +730,8 @@ _PREVIEW_MAX_PX = 800   # display-only decimation bound (plumbing, not science)
 
 
 def render_rgb_preview(candidate, bbox):
-    """AOI-clipped true-color preview -> PNG bytes (S2/Landsat red/green/blue).
-
-    DISPLAY ONLY: decimated read + 2-98 percentile stretch; never feeds any metric
-    or gate. Seeing their fire area (thin haze included) is the most intuitive
-    quality signal for a non-remote-sensing user (spec 7). Grouped candidates
-    mosaic first-valid-wins; uncovered/fill pixels render dark gray.
-    """
+    """AOI-clipped true-color preview -> PNG bytes. DISPLAY ONLY: never feeds any metric or
+    gate."""
     import io
 
     import rasterio

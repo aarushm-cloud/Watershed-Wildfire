@@ -1,4 +1,4 @@
-"""P3.4-build-2a ENTRYPOINT lock (A30) -- the per-fire I/O + provenance surface is threaded, and
+"""ENTRYPOINT lock (A30) -- the per-fire I/O + provenance surface is threaded, and
 run.py resolves fires without touching the Montecito byte-for-byte path.
 
 WHAT THIS LOCKS (and what it deliberately does NOT):
@@ -11,10 +11,9 @@ WHAT THIS LOCKS (and what it deliberately does NOT):
   - Test 4 proves run.py's fire registry resolves + rejects.
 
 COVERAGE BOUNDARY (stated for the record): tests 5-6 dynamically prove dem/sbs consumption and
-test 3 proves expected_crs. assets, creeks, and the A27-refusal out_dir threaded through
-run_pipeline are NOT dynamically exercised here -- no runnable non-Montecito or incised fire exists
-until the ordering build -- so they rest on the adversarial grep for leftover module globals in
-run_pipeline's body. That grep is LOAD-BEARING, not incidental.
+test 3 proves expected_crs. assets, creeks, and the refusal-path out_dir threaded through
+run_pipeline are NOT dynamically exercised here -- they rest on the adversarial grep for
+leftover module globals in run_pipeline's body. That grep is LOAD-BEARING, not incidental.
 
 Run:  pytest tests/app/test_entrypoint.py -v
 """

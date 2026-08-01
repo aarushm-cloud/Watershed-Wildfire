@@ -1,12 +1,12 @@
-"""CF-A (A34 / P2.2c): run_pipeline scores a dNBR fire through BOTH arms and reproduces the committed
-P2.3 Montecito swap-test oracle.
+"""run_pipeline scores a dNBR fire through BOTH arms (A34) and reproduces the committed
+Montecito swap-test oracle.
 
-The dNBR scoring path was built + unit-tested (src.ingest.ingest_dnbr_both_arms) but UNWIRED --
-`ingest_burn` hard-refused any non-SBS selection (A29), so production could not score dNBR at all.
-This locks the production wiring: a dNBR fire (sbs=None, dnbr=<native raster>) runs end-to-end, scores
-Arm A (binned, primary) and Arm B (continuous companion), and returns both.
+`ingest_burn` hard-refuses any non-SBS selection (A29): dNBR enters production ONLY via the
+fire config (sbs=None, dnbr=<native raster>) through ingest_dnbr_both_arms. This locks that
+wiring: a dNBR fire runs end-to-end, scores Arm A (binned, primary) and Arm B (continuous
+companion), and returns both.
 
-Oracle (frozen; validation/out/montecito_dnbr/p2_3_side_by_side + the dNBR input-swap finding):
+Oracle (frozen; validation/out/montecito_dnbr/p2_3_side_by_side, the dNBR input-swap record):
   Arm A (primary):   #1 = San Ysidro Creek (basin 9, score 3.314); Cold Spring (basin 6) = rank 2 (3.280).
   Arm B (companion): #1 = Cold Spring (basin 6).
   rank-AUC = 0.9722 under BOTH arms (identical to the SBS control -- triage preserved).

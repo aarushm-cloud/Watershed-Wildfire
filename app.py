@@ -1,23 +1,9 @@
-"""app.py -- local Streamlit frontend (A36), the thin UI over run_pipeline for non-developers.
+"""app.py -- local single-user Streamlit UI over the pipeline (A36): draw a bbox, upload or
+generate a dNBR -> ranked map + CSV, or a legible refusal. No science here.
 
-Draw/enter a bounding box, upload a raw dNBR GeoTIFF, click run -> acquire.build_fire_config
-(A35) auto-fetches DEM + buildings and assembles the A30 fire dict -> run_pipeline scores the
-dNBR both-arms path (A34) -> a ranked map + CSV, or a legible refusal. A **local, single-user
-tool that wraps the CLI** (A36 reconciles A7's "no live service"); not hosted, not multi-user.
-
-Guardrail tier: Tier-2 (UI plumbing) -- no science here. The frozen formula, dNBR knobs, and
-`src/` are untouched; this only orchestrates acquire + run_pipeline + the existing output writers.
-
-Every artifact keeps the screening spine (A11: within-fire relative ranking, never a prediction)
-and the dNBR n=1 framing (A34: triage-validated, not exact-rank-validated). EVERY failure renders
-as a legible message, never a stack trace (F5): fail-loud aborts (GateAbort/ValueError) verbatim,
-the A27 terrain refusal as an honest outcome, and anything else (network/GDAL/osmnx) via the
-run_screening backstop with the exception NAMED -- translated loud, never swallowed. A stored
-result is stamped with the inputs that produced it; editing the box/upload flags it stale (F8).
-
-Testability: all logic lives in pure, importable helpers; the Streamlit UI is in `main()` behind
-an `if __name__ == "__main__"` guard, so `import app` (tests) never executes the UI. See
-tests/app/test_app.py. Run the app with:  streamlit run app.py
+Every failure renders as a legible message, never a stack trace; logic lives in pure helpers
+(the UI is in main() behind __main__, so `import app` never executes it).
+Run:  streamlit run app.py
 """
 from __future__ import annotations
 
@@ -35,20 +21,14 @@ if str(_REPO_ROOT) not in sys.path:
 from src.grids import GateAbort
 from src.outputs import SCREENING_STATEMENT, DUAL_RANK_MAP_NAME
 
-# |rankA - rankB| at/above which a basin is flagged "rank uncertain" (display heuristic, Tier-2, not a
-# science value): the honest surfacing of Arm A / Arm B disagreement (A34 rank_delta). The cutoff scales
-# max(DELTA, round(FRAC * n)) -- a fixed 3 saturates on 250+-basin fires; the floor keeps Montecito-scale
-# (<= ~50-basin) fires at the validated fixed cutoff. See _uncertain_threshold.
+# Rank-uncertain display cutoff: max(DELTA, round(FRAC * n)) -- see _uncertain_threshold.
 RANK_UNCERTAIN_DELTA = 3
 RANK_UNCERTAIN_FRAC = 0.06
 
-# Decimal places for BOTH the bbox number_input display AND the F8 staleness key -- one constant so they
-# cannot drift apart (a key finer than the display flags stale after a visually no-op edit). 5 dp ~= 1 m
-# at these latitudes, far below the 10 m analysis cell, so sub-key differences are screening-irrelevant.
-_BBOX_DP = 5
+_BBOX_DP = 5   # decimal places for BOTH the bbox display AND the staleness key (must match)
 
 
-# ---- pure helpers (no Streamlit; unit-tested in tests/app/test_app.py) ------------------------------
+# ---- pure helpers (no Streamlit) ----
 
 def validate_bbox(west, south, east, north) -> tuple:
     """Fail loud + legible on a malformed bbox BEFORE any network work (A8). Returns floats."""
@@ -94,10 +74,7 @@ def _uncertain_threshold(n_basins: int, *, floor: int = RANK_UNCERTAIN_DELTA,
 
 
 def basin_rows(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA) -> list:
-    """basins.geojson -> display rows sorted by the Arm A headline rank. Columns are ordered so the
-    frozen score reads left-to-right as its own inputs -- mean_burn x mean_slope x area_km2 -> score
-    -- making the ranking auditable. Burn is the Arm A binned value (the term the headline score uses);
-    slope + area are identical across arms. Carries the rank_delta 'uncertain' flag (A34)."""
+    """basins.geojson -> display rows in Arm A rank order, with the rank_delta 'uncertain' flag."""
     features = fc.get("features", [])
     threshold = _uncertain_threshold(len(features), floor=uncertain_delta)
     rows = []
@@ -162,18 +139,9 @@ def bbox_from_draw(draw: dict):
 
 
 def screen_inputs_key(west, south, east, north, dnbr_file, *, mode="upload", gen=None):
-    """Identity of the inputs a screening result was produced from (F8 staleness check).
-
-    A stored result is only "current" for the exact bbox + upload that produced it; after the user
-    edits the box or swaps the file, the old map/CSV must be flagged, never silently posed as the
-    new inputs' screening. The upload identity prefers Streamlit's per-upload file_id (a re-upload
-    of a same-named file gets a fresh id), falling back to (name, size). No upload -> None.
-
-    Generate mode (AA-4): pass mode="generate" and gen=(ignition_iso, containment_iso,
-    greenup_days, pre_scene_id, post_scene_id) -- the dates AND the approved pair are part of the
-    result's identity, so editing a date or swapping a scene flags the old result stale. The
-    default (upload, gen=None) returns the legacy 5-tuple unchanged, so existing stamps and the
-    upload path are byte-identical."""
+    """Identity of the inputs a screening result was produced from (staleness check): a stored
+    result is only current for the exact bbox + upload (or generate dates + approved pair) that
+    produced it."""
     f = None
     if dnbr_file is not None:
         fid = getattr(dnbr_file, "file_id", None)         # Streamlit sets a fresh uuid per upload
@@ -189,21 +157,12 @@ def screen_inputs_key(west, south, east, north, dnbr_file, *, mode="upload", gen
 
 
 def run_screening(bbox_raw, dnbr_file, *, name="frontend", contour_m=150.0):
-    """One screening run end-to-end -> the screen dict main() stores in session_state
-    (kind: ranked | refused | error).
-
-    EVERY failure reduces to a legible {"kind": "error"} -- never a raise, never a stack trace to
-    the user (F5): GateAbort/ValueError carry their domain message verbatim; ANY other exception
-    (network drop, GDAL/rasterio on a wrong upload, osmnx/requests -- RasterioIOError is an OSError,
-    which the old narrow except let straight through to a Streamlit traceback) hits the backstop and
-    is prefixed with its type. Not a swallow: the failure is NAMED in the message and nothing is
-    retried or defaulted (A8 -- the sin is silence, not scope). Pure orchestration, no st.* calls,
-    so tests drive it directly with fakes (tests/app/test_app.py)."""
+    """One screening run end-to-end -> {"kind": ranked | refused | error}. EVERY failure
+    reduces to a legible error dict, never a raise (the failure type is NAMED, nothing is
+    swallowed). Pure orchestration, no st.* calls."""
     out_dir = None
     try:
-        # deferred imports INSIDE the try (still keeping `import app` light for unit tests): an
-        # import-time failure in the heavy geo stack then reduces to a legible {"kind":"error"} dict
-        # too, honoring the "EVERY failure" contract above rather than escaping as a raw traceback.
+        # deferred imports inside the try: an import-time failure also reduces to a legible error
         from acquire import build_fire_config
         from src.pipeline import run_pipeline
         from src.outputs import write_dnbr_outputs
@@ -225,9 +184,7 @@ def run_screening(bbox_raw, dnbr_file, *, name="frontend", contour_m=150.0):
                 subbasin_meta=result.get("subbasin_meta"))
             try:
                 fc = json.loads(Path(gj_path).read_text())
-            except json.JSONDecodeError as e:   # a truncated geojson WE wrote is an internal fault, not
-                # a domain bbox/scale error -- route it to the backstop (type-named + logged) rather than
-                # render the cryptic JSONDecodeError verbatim through the domain-message catch below.
+            except json.JSONDecodeError as e:   # our own truncated geojson = internal fault -> backstop
                 raise RuntimeError(f"wrote an unreadable basins.geojson at {gj_path}: {e}") from e
             screen = {"kind": "ranked", "n": view["n_basins"], "fc": fc,
                       "csv": Path(csv_path).read_bytes(), "incised": view["incised"]}
@@ -239,30 +196,25 @@ def run_screening(bbox_raw, dnbr_file, *, name="frontend", contour_m=150.0):
             return {"kind": "refused", "message": view["message"]}
         return {"kind": "error", "message": view.get("message", "Unexpected pipeline result.")}
     except (GateAbort, ValueError) as e:
-        return {"kind": "error", "message": str(e)}     # legible domain message (bbox/scale/zone), verbatim
-    except Exception as e:                              # F5 backstop: never a traceback to the user
+        return {"kind": "error", "message": str(e)}     # domain message, verbatim
+    except Exception as e:                              # backstop: never a traceback to the user
         import traceback
-        traceback.print_exc(file=sys.stderr)           # preserve the dev debugging channel (the console)
+        traceback.print_exc(file=sys.stderr)
         return {"kind": "error", "message": f"unexpected {type(e).__name__} during screening: {e}"}
     finally:
-        if out_dir is not None:                        # minor: no per-run temp-dir leak -- the outputs
-            shutil.rmtree(out_dir, ignore_errors=True)  # are already read into memory before the return
+        if out_dir is not None:
+            shutil.rmtree(out_dir, ignore_errors=True)
 
 
-# ---- Generate-from-dates helpers (AA-4, Auto-Acquire Phase 4; pure, no st.*) --------------------
+# ---- Generate-from-dates helpers (pure, no st.*) ----
 
-# Verdict icons for the deterministic rubric (display only; the rubric itself is frozen
-# in scene_select -- identical metrics always render the identical scorecard).
 _VERDICT_ICONS = {"good": "✅", "ok": "\U0001f7e1", "marginal": "\U0001f7e0",
                   "below_bar": "\U0001f534"}
 
 
 def generate_package(bbox_raw, ignition, containment, greenup_days=90):
-    """Run the deterministic selector -> {"kind": "package"} | {"kind": "error"}.
-
-    Same failure contract as run_screening (F5): GateAbort/ValueError verbatim, anything
-    else backstopped with its type named. The package's honest non-pair states (waiting /
-    window_closed / no_pre_scene) are NOT errors -- they pass through inside the package."""
+    """Run the deterministic selector -> {"kind": "package"} | {"kind": "error"}. Honest
+    non-pair states (waiting / window_closed / no_pre_scene) pass through inside the package."""
     try:
         from autoacquire import scene_select
         bbox = validate_bbox(*bbox_raw)
@@ -278,13 +230,8 @@ def generate_package(bbox_raw, ignition, containment, greenup_days=90):
 
 
 def scorecard_view(package) -> dict:
-    """Recommendation package -> a pure view model for the approval scorecard (spec section 7).
-
-    Cloud-over-YOUR-fire is the headline number; tile-cloud is shown but explicitly
-    de-emphasized (teaching the right mental model is half the value). The timing flag is
-    derived from FROZEN values only: a post-scene is flagged when it sits beyond the
-    conservative default green-up ceiling (only reachable via the operator override) --
-    no new judgment threshold is invented here."""
+    """Recommendation package -> the approval-scorecard view model. Cloud-over-YOUR-fire is
+    the headline; tile-cloud de-emphasized; timing flag derived from frozen values only."""
     from datetime import date as _date, timedelta as _td
 
     pair = package["pair"]
@@ -322,15 +269,9 @@ def scorecard_view(package) -> dict:
 
 
 def run_generated_screening(bbox_raw, pair, *, name="frontend", contour_m=150.0):
-    """Approved pair -> dNBR (creator) -> the SAME validated downstream as an upload
-    (build_fire_config -> run_pipeline -> write_dnbr_outputs) -> the screen dict.
-
-    Identical failure contract to run_screening (F5): every failure reduces to a legible
-    {"kind": "error"}. Extra keys on success: quicklook (PNG bytes) + dnbr_provenance
-    (the creator's audit record) so the UI can show what was built. No science here --
-    the creator + pipeline own their own gates (AA-2/AA-3). contour_m mirrors run_screening:
-    the per-fire mountain-front elevation (B2) is threaded into run_pipeline so the Generate
-    path honors the operator's contour too, not just the Upload path."""
+    """Approved pair -> dNBR (creator) -> the SAME validated downstream as an upload -> the
+    screen dict. Failure contract identical to run_screening; extra success keys: quicklook +
+    dnbr_provenance."""
     out_dir = None
     try:
         from autoacquire import dnbr_create
@@ -377,16 +318,14 @@ def run_generated_screening(bbox_raw, pair, *, name="frontend", contour_m=150.0)
 
 
 def _basin_centroid(feat: dict):
-    """A representative interior point [lat, lon] (folium order) for a basin polygon -- for numbered
-    markers and zoom-to. representative_point stays inside concave/multipart shapes (a bounds center may not)."""
+    """Representative interior point [lat, lon] for a basin polygon (stays inside concave shapes)."""
     from shapely.geometry import shape
     pt = shape(feat["geometry"]).representative_point()
     return [pt.y, pt.x]
 
 
 def _top_k_markers(fc: dict, k: int) -> list:
-    """[(rank, [lat, lon]), ...] for the k highest-priority basins, in rank order -- the basins that get
-    a numbered map marker so the top of the ranking is findable at a glance on a large fire."""
+    """[(rank, [lat, lon]), ...] for the k highest-priority basins, in rank order."""
     marked = []
     for feat in fc.get("features", []):
         rank = feat.get("properties", {}).get("rank")
@@ -397,9 +336,8 @@ def _top_k_markers(fc: dict, k: int) -> list:
 
 def build_basin_map(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA,
                     top_k: int = 10, focus_basin_id=None) -> folium.Map:
-    """A folium map of the ranked basins: fill by Arm A rank (hot=priority); a blue dashed outline
-    flags basins where Arm A / Arm B disagree (rank-uncertain, A34). The top_k highest-priority basins
-    carry a numbered marker (findable at a glance on a large fire); focus_basin_id zooms to one basin."""
+    """Folium map of the ranked basins: fill by Arm A rank, dashed outline = rank-uncertain,
+    numbered markers on the top_k, focus_basin_id zooms to one basin."""
     rows = {r["basin_id"]: r for r in basin_rows(fc, uncertain_delta=uncertain_delta)}
     n = max(len(rows), 1)
     m = folium.Map(location=_fc_center(fc), zoom_start=12, tiles="OpenStreetMap")
@@ -462,10 +400,8 @@ def _draw_map():
 
 
 def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, contour_m=150.0):
-    """The AA-4 approval surface: scorecard + previews + approve / burn-map / swap
-    actions, or the honest non-pair states (Mode B waiting / window-closed / no-pre).
-    Machine proposes, human disposes -- nothing is built without the Approve click.
-    UI-side (imports streamlit); all decisions live in the pure helpers + scene_select."""
+    """The Generate-mode approval surface. Machine proposes, human disposes -- nothing is
+    built without the Approve click."""
     import streamlit as st
     from autoacquire import scene_select
 
@@ -476,8 +412,7 @@ def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, contour
     package = (outcome.get("package") or {})
     status = package.get("status")
     if status == "waiting":
-        # Mode B (Q3a v1): honest waiting state + user-driven re-check. NEVER a
-        # burn-less ranking; the B1 exploratory-layers viewer is its own queued item.
+        # Honest waiting state + user-driven re-check. NEVER a burn-less ranking.
         st.warning(f"**No usable post-fire scene yet.** {package['message']}")
         st.markdown(
             f"- Satellite passes checked since containment: **{package['passes_tried']}**\n"
@@ -562,8 +497,7 @@ def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, contour
                 st.error(str(e))
 
     if show_map:
-        # On-demand quicklook for the recommended pair ONLY (spec 7: lean by default,
-        # the powerful scar-vs-news-map eyeball one click away).
+        # On-demand quicklook for the recommended pair only.
         import tempfile as _tf
         tmp = Path(_tf.mkdtemp(prefix="wws_burnmap_"))
         try:
@@ -588,7 +522,7 @@ def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, contour
         with st.spinner("Building the dNBR, fetching DEM + buildings, scoring both arms..."):
             screen = run_generated_screening(bbox_raw, package["pair"], contour_m=contour_m)
             screen["inputs"] = inputs_key
-            screen_box.clear(); screen_box.update(screen)   # same F1 store pattern as upload
+            screen_box.clear(); screen_box.update(screen)   # same store pattern as upload
 
 
 def main():
@@ -614,17 +548,11 @@ def main():
         south = st.number_input("South (lat)", value=float(drawn[1]), format=f"%.{_BBOX_DP}f")
         east = st.number_input("East (lon)", value=float(drawn[2]), format=f"%.{_BBOX_DP}f")
         north = st.number_input("North (lat)", value=float(drawn[3]), format=f"%.{_BBOX_DP}f")
-        # B2: per-fire mountain-front contour (m) -- the elevation where canyons discharge onto the
-        # depositional plain. Guard-checked against THIS fire's DEM range (not a frozen scalar; an
-        # operator input defaulted to the Montecito value). Inland high-elevation fires need ~1900.
-        # Shared across BOTH modes (a terrain parameter, not upload-specific), so it sits above the
-        # toggle and applies to the Upload run and the Generate approval alike.
+        # Per-fire mountain-front contour (m), operator input (B2); shared across both modes.
         contour_m = st.number_input("Mountain-front contour (m)", value=150.0, step=10.0,
                                     help="Range-front break elevation for THIS fire "
                                          "(Montecito ~150; Cooks Peak ~1900; Deer Canyon ~1910).")
-        # AA-4: the [Upload | Generate] toggle (spec section 10) -- one panel at a time;
-        # Upload stays the DEFAULT during the build + demos (the proven path). Rendered as
-        # a horizontal radio (same one-panel affordance, AppTest-drivable).
+        # The [Upload | Generate] toggle; Upload is the default (the proven path).
         mode_label = st.radio("Burn severity input",
                               ["Upload a dNBR", "Generate from dates"], horizontal=True)
         dnbr_file = None
@@ -649,14 +577,11 @@ def main():
                          "operator override).")
             find = st.button("Find scene pair", type="primary")
 
-    # Generate-mode session container (same plain-mutation pattern as `screen`, F1).
     if "gen" not in st.session_state:
         st.session_state["gen"] = {}
     gen_box = st.session_state["gen"]
 
-    # Identity of the CURRENT form inputs -- computed every rerun, used both to stamp a fresh result
-    # and to detect a stale one (F8). In Generate mode the dates + the currently-selected pair are
-    # part of the identity (a swapped scene or edited date flags the old result stale).
+    # Identity of the CURRENT form inputs: stamps a fresh result / flags a stale one.
     if mode_label == "Upload a dNBR":
         inputs_key = screen_inputs_key(west, south, east, north, dnbr_file)
     else:
@@ -675,38 +600,28 @@ def main():
             gen_box.clear()
             gen_box.update({"outcome": outcome})
 
-    # F1: hold the screen in a PERSISTENT container so storing a COMPLETED run is a plain dict mutation,
-    # never a SafeSessionState.__setitem__ (whose _yield_callback fires BEFORE the store -- so a rerun
-    # queued mid-fetch, e.g. an st_folium map click during the tens-of-seconds fetch, would raise
-    # RerunException between the finished run and its store and silently DISCARD the result). Established
-    # pre-run so the yield here is harmless (nothing computed yet to lose).
+    # Persistent container: storing a completed run must be a plain dict mutation -- a
+    # SafeSessionState store can yield to a queued rerun mid-fetch and silently DISCARD the result.
     if "screen" not in st.session_state:
         st.session_state["screen"] = {}
     box = st.session_state["screen"]
 
-    # On click: compute the outcome (run_screening reduces EVERY failure to a legible dict -- F5) and
-    # store it stamped with the inputs that produced it, via a plain mutation of `box`. Rendered from
-    # the container below so it persists across the reruns st_folium/download trigger.
     if run:
         with st.spinner("Fetching DEM + buildings and scoring both dNBR arms..."):
             screen = run_screening((west, south, east, north), dnbr_file, contour_m=contour_m)
             screen["inputs"] = inputs_key
-            box.clear(); box.update(screen)          # store INSIDE the spinner, BEFORE its exit yields --
-            #   plain dict mutation with no yield point between the finished run and the store (F1)
+            box.clear(); box.update(screen)   # plain mutation, no yield between run and store
 
-    # AA-4: the Generate panel (scorecard / Mode B waiting / honest hard-fails) renders
-    # full-width below the form; an approval inside it stores into `box` like an upload run.
+    # The Generate panel renders below the form; an approval stores into `box` like an upload run.
     if mode_label == "Generate from dates" and gen_box:
         _render_generate_panel(gen_box, (west, south, east, north), inputs_key, box,
                                contour_m=contour_m)
 
     screen = box
-    if not screen:                                    # empty container -> nothing screened yet
+    if not screen:
         return
-    # F8: a stored result is only current for the inputs that produced it. After the user edits the box
-    # or swaps the upload without re-running, keep the result visible but clearly labeled stale. An
-    # ABSENT stamp (a pre-F8 result surviving a dev hot-reload) counts as stale too -- unknown provenance
-    # renders flagged, not silently clean (fail-loud); a screening artifact must never pose as current.
+    # A stored result is only current for the inputs that produced it; an absent stamp counts
+    # as stale too -- a screening artifact must never pose as current.
     if screen.get("inputs") != inputs_key:
         st.warning("**Inputs changed since this result was produced** -- the box/upload above no "
                    "longer match what is shown below. Click **Run screening** to re-screen.")
@@ -733,8 +648,7 @@ def main():
         )
     st.success(f"Ranked {screen['n']} basins — Arm A (binned) is the headline; "
                f"Arm B (continuous) rides alongside.")
-    # Basin lookup: the top basin is hard to find by eye on a large fire. The top-K basins carry numbered
-    # markers (build_basin_map), and this control zooms the map to any rank on demand.
+    # Basin lookup: numbered top-K markers + zoom-to-rank for large fires.
     n_basins = screen["n"]
     focus_id = None
     if n_basins > 1:
@@ -764,8 +678,7 @@ def main():
             "intensity is a secondary lens (it scored higher on the one validation case), not the headline."
         )
 
-    # B: surface the frozen score's inputs (burn x slope x area) beside the score so the ranking is
-    # auditable; readable headers via column_config (the score carries the formula as a tooltip).
+    # Surface the score's inputs beside it so the ranking is auditable.
     rows = basin_rows(fc)
     column_config = {
         "basin_id": "Basin", "rank": "Rank (Arm A)",
@@ -777,7 +690,7 @@ def main():
         "rank_b": "Rank (Arm B)", "score_b": "Score (Arm B)",
         "rank_delta": "Rank Δ", "uncertain": "Rank-uncertain",
     }
-    if screen.get("incised"):   # A40: incised ranks by the frozen `score` (headline); intensity = companion
+    if screen.get("incised"):   # incised adds the intensity companion columns (A40)
         column_config["intensity"] = st.column_config.NumberColumn(
             "Intensity", format="%.4f",
             help="= mean burn × mean slope, area-independent — an exploratory companion lens on incised "

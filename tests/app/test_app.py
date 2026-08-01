@@ -1,4 +1,4 @@
-"""CF-10 (A36) -- the testable core of the Streamlit frontend `app.py`.
+"""The testable core of the Streamlit frontend `app.py` (A36).
 
 Streamlit UIs resist direct unit testing, so `app.py` keeps its logic in pure, importable
 helpers (no `st.*` at module top level; the UI lives in `main()` behind an `if __name__ ==
@@ -8,8 +8,8 @@ helpers (no `st.*` at module top level; the UI lives in `main()` behind an `if _
   * basin_rows      -- basins.geojson -> display rows (Arm A rank order + the rank_delta "uncertain" flag).
   * build_basin_map -- smoke: returns a folium.Map (rendering is exercised, internals are not asserted).
 
-The live end-to-end (draw bbox + upload dNBR -> map + CSV, and a clean refusal render) is the
-CF-10 gate, verified separately -- it needs the network + a running Streamlit server.
+The live end-to-end (draw bbox + upload dNBR -> map + CSV, and a clean refusal render) is
+verified separately -- it needs the network + a running Streamlit server.
 
 Run:  pytest tests/app/test_app.py -v
 """

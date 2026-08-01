@@ -1,13 +1,6 @@
-"""grids.py -- the inter-stage data contract: CRS, affine convention, the
-(row, col) outlet rule, dtype/nodata, and boundary-validation assertions
-(anti-0km2 guard, sane-area check, alignment check). Not an orchestrator.
-See ARCHITECTURE.md and DECISIONS A7.
+"""grids.py -- the inter-stage data contract: GateAbort, CRS helpers, alignment assertions.
 
-P1.1: holds ONLY the fail-loud exception + the shared coordinate/CRS helpers that
-ALREADY existed in validation/gate.py, extracted verbatim. No dataclasses and no new
-assertion helpers (both deferred to later phases). Depends ONLY on src.config (the
-dependency leaf) -- the single allowed intra-project import direction; importing anything
-else here would invert the contract.
+Depends only on src.config; importing any other project module here would invert the contract.
 """
 from __future__ import annotations
 
@@ -21,14 +14,7 @@ class GateAbort(RuntimeError):
 
 
 def _assert_metric_crs(layer_crs, name: str) -> None:
-    """Fail loud unless `layer_crs` is an ALLOWED metric UTM zone (A25/A37 allowlist).
-
-    The job is to refuse a non-metric CRS so we never compute distances in degrees. A25 made this
-    per-fire; A37 widened config.ALLOWED_UTM_ZONES to the whole CONUS coverage (UTM 10N-19N /
-    EPSG 32610..32619). A zone NOT in the set -- including any geographic CRS like EPSG:4326, or a
-    non-CONUS UTM zone -- fails loud (block the fire), never silently proceeds. String-normalised
-    (str().upper()) exactly as before, so the Montecito 32611 path is unchanged. (Every allowed
-    zone is metric UTM, so set membership == metric+allowed.)"""
+    """Fail loud unless `layer_crs` is an allowed metric UTM zone -- never compute distances in degrees."""
     allowed = {f"EPSG:{z}" for z in ALLOWED_UTM_ZONES}
     if layer_crs is None or str(layer_crs).upper() not in allowed:
         raise GateAbort(f"{name} CRS is {layer_crs}, not in the allowed metric UTM zones "
@@ -45,24 +31,8 @@ def _rc_to_xy(rows: np.ndarray, cols: np.ndarray, transform) -> np.ndarray:
 
 def assert_aligned(ref_profile, other_profile, *, ref_name: str = "DEM",
                    other_name: str = "SBS", expected_crs=CANONICAL_CRS) -> None:
-    """Fail loud unless two rasters share ONE grid (CRS / shape / affine).
-
-    EXTRACTED VERBATIM (P2.2a) from the inline DEM/SBS check in gate.stage_2a_hydrology. A25
-    makes the fixed-zone check per-fire and closes the unguarded-`other` gap:
-      * `expected_crs` (kwarg, DEFAULTS to config.CANONICAL_CRS) is the fixed zone ref must be in.
-        Sourced from `dem_profile["crs"]` for a per-fire run; left at the default for the
-        Montecito gate, so that path is byte-for-byte unchanged (no test asserts a CRS literal).
-      * NEW: ref's CRS must also equal other's CRS. Previously `other`'s CRS was NEVER examined
-        (the comment below used to say SBS was "tied via shape+transform"); this is STRICTLY
-        STRONGER -- two layers with equal shape/affine but different CRS would have slipped
-        through, and now fail loud.
-    CRS comparison is str().upper() on BOTH sides so 32613 (int), "epsg:32613" and "EPSG:32613"
-    compare equal. The shape + transform equality asserts (what actually pin dNBR-A/B to the DEM
-    grid) are UNCHANGED. The DEM-resolution check (transform.a == CELL_M) is a single-layer
-    property, NOT a pairwise alignment check, so it stays at the call site.
-
-    ref_name/other_name default to DEM/SBS so the existing messages stay byte-identical; pass
-    other_name='dNBR' (etc.) for other pairs. Raises GateAbort on any mismatch (FM-10)."""
+    """Fail loud (GateAbort) unless two rasters share one grid: same CRS, shape, and affine.
+    `expected_crs` is the zone `ref` must be in (pass the fire's own DEM CRS for a per-fire run)."""
     exp = str(expected_crs).upper()
     if str(ref_profile["crs"]).upper() != exp:
         raise GateAbort(f"{ref_name} CRS {ref_profile['crs']} != {exp}.")

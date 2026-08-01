@@ -1,17 +1,16 @@
-"""CF-7/CF-8/CF-9 (A35) -- the hermetic parts of the acquisition layer:
+"""The hermetic parts of the acquisition layer (A35):
 
-  * tiles_for_bbox   -- 3DEP 1-degree COG tile enumeration (generalizes South Fork's ONE
-                        hardcoded tile n34w106 to any bbox). Pure; no network.
-  * assert_raw_dnbr  -- CF-9 Tier-1-adjacent guard: the uploaded dNBR must be RAW scale
-                        (~-2..2), because the frozen bins (src.config.DNBR_BIN_EDGES /
-                        DNBR_CLAMP) are defined on raw dNBR. An apparent x1000 upload is
-                        REFUSED (never silently rescaled). Hermetic (tiny in-memory rasters).
-  * build_fire_config-- CF-9 orchestrator: assembles the A30 `fire` dict (sbs=None, dnbr set).
+  * tiles_for_bbox   -- 3DEP 1-degree COG tile enumeration for any bbox. Pure; no network.
+  * assert_raw_dnbr  -- the raw-scale guard: the uploaded dNBR must be RAW scale (~-2..2),
+                        because the frozen bins (src.config.DNBR_BIN_EDGES / DNBR_CLAMP) are
+                        defined on raw dNBR. An apparent x1000 upload is REFUSED (never
+                        silently rescaled). Hermetic (tiny in-memory rasters).
+  * build_fire_config-- the orchestrator: assembles the A30 `fire` dict (sbs=None, dnbr set).
                         Tested with the two network fetchers monkeypatched -> hermetic shape test.
 
-The live network fetch (CF-7 fetch_dem / CF-8 fetch_buildings against USGS 3DEP + Overpass)
-is verified separately against South Fork's committed artifacts (see the CF-C verification run),
-not in this suite -- its inputs are gitignored and it needs the network.
+The live network fetch (fetch_dem / fetch_buildings against USGS 3DEP + Overpass) is verified
+separately against South Fork's committed artifacts, not in this suite -- its inputs are
+gitignored and it needs the network.
 
 Run:  pytest tests/acquire/test_acquire_fetch.py -v
 """

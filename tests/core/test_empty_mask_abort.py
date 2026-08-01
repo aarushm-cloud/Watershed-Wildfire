@@ -6,7 +6,7 @@ on an empty mask because a zero there is a MEANINGFUL value (a genuinely unburne
 basin). An empty *mask* is not a meaningful zero: it can only occur if delineate's
 MIN_BASIN_KM2 guarantee (every retained basin >= min area) has been violated upstream -- i.e.
 the run's own premises are broken. So mean_slope FAILS LOUD (GateAbort) rather than emit
-np.mean([]) -> nan -> nan score (A8/A29 fail-loud; ratified A32).
+np.mean([]) -> nan -> nan score (A8 fail-loud; A32).
 
 This state cannot occur on Montecito or through the current pipeline, so the fixture builds it
 by hand -- a guard no fixture can trip is dead code by this project's own standard.

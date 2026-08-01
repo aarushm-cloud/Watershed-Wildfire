@@ -1,16 +1,16 @@
-"""FM-1 SCALE-FREE anti-collapse guard (supersedes the Montecito-calibrated PASS/FINDING/ABORT
-bands). The domain pour-point's catchment must be at least MASTER_MIN_AOI_FRACTION of the AOI's
-VALID DEM area, else GateAbort. This freezes TWO things at once:
+"""FM-1 SCALE-FREE anti-collapse guard (A38). The domain pour-point's catchment must be at
+least MASTER_MIN_AOI_FRACTION of the AOI's VALID DEM area, else GateAbort. This freezes TWO
+things at once:
 
-  (1) the guard still fires on the FM-1 signature (pysheds coordinate-mode returned 0 km^2 and
-      silently deleted the two largest flowed basins) -- proven here at several AOI sizes, so the
-      protection is SCALE-FREE (a fraction), not tied to Montecito's ~39-45 km^2 absolute band;
-  (2) a legitimately LARGE fire (master 300 km^2) is NOT aborted -- the old MASTER_ORDER_HI = 80 km^2
-      band would have false-aborted it. That regression direction is the whole point of the change.
+  (1) the guard fires on the FM-1 signature (pysheds coordinate-mode returned 0 km^2 and
+      silently deleted the two largest flowed basins) -- proven here at several AOI sizes, so
+      the protection is SCALE-FREE (a fraction), not tied to any one fire's absolute band;
+  (2) a legitimately LARGE fire (master 300 km^2) is NOT aborted -- an absolute km^2 ceiling
+      would false-abort it. That regression direction is exactly what this file locks.
 
 Derivation anchor (validation/data/dem.tif, loaded as the pipeline loads it):
   valid AOI = 168.9332 km^2 ; master_km2 = 44.7273 ; master/valid = 0.26476.
-  Floor 0.05 = that fraction / ~5 (5x collapse-detection margin). See DECISIONS (scale-free guard)
+  Floor 0.05 = that fraction / ~5 (5x collapse-detection margin). See DECISIONS A38
   + docs/ALGORITHMS_REVIEW.md T5.
 """
 import math

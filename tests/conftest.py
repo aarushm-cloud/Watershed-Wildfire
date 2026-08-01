@@ -1,4 +1,4 @@
-"""Shared fixtures. Introduced by A39 -- the suite previously used plain functions."""
+"""Shared fixtures for the suite."""
 from pathlib import Path
 
 import numpy as np
