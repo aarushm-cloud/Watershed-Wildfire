@@ -41,7 +41,7 @@ A jurisdiction whose fire was never assessed can still get a defensible starting
 
 One run over a single fire writes to `out/<fire>/`:
 
-- **`ranking.csv`** — the within-fire ordinal ranking of detected basins, highest screening concern first, with the per-basin terms (`mean_burn`, `mean_slope`, `area_km2`), both dNBR arms, and coverage/uncertainty flags. Two leading comment lines carry the screening framing and the burn-source provenance stamp.
+- **`ranking.csv`** — the within-fire ordinal ranking of detected basins, highest screening concern first, with the per-basin terms (`mean_burn`, `mean_slope`, `area_km2`), both dNBR arms, and coverage/uncertainty flags. Two leading comment lines carry the screening framing and the burn-source provenance stamp. Basins whose dNBR NoData/cloud exceeds the frozen 20% bar are refused individually ("insufficient data" -- hazard unknown, not low) and listed in refused_basins.csv; the ranking covers clean basins only (A41).
 - **`basins.geojson`** — the delineated basin polygons, reprojected to EPSG:4326, with a top-level `provenance` member so the framing travels with the geometry.
 
 The interactive **ranked basin map** is rendered live in the local app (fill = headline rank, with basins outlined where the two dNBR arms disagree); it is a view over the artifacts above, not a separate persisted file. There is no confident-hazard raster and no per-building output by design.
@@ -137,7 +137,7 @@ score(basin) = mean_burn_severity × mean_slope × contributing_area_km²
 
 Slope is the dimensionless gradient magnitude `tan θ` (rise/run, central differences on the raw metric DEM); `mean_burn` is dimensionless in `[0, 1]`; area is in km². Each term proxies a first-order driver: burn → runoff generation / infiltration collapse; slope → transport energy; area → water and sediment volume available. The formula is not a tunable — changing it re-opens validation. Basins are then ranked ordinally within the fire.
 
-**Output.** Writes `ranking.csv` and `basins.geojson`, each stamped with the burn-source provenance and the embedded screening framing.
+**Output.** Writes `ranking.csv` and `basins.geojson`, each stamped with the burn-source provenance and the embedded screening framing. Basins whose dNBR NoData/cloud exceeds the frozen 20% bar are refused individually ("insufficient data" -- hazard unknown, not low) and listed in refused_basins.csv; the ranking covers clean basins only (A41).
 
 ### Two terrain tiers
 
@@ -161,6 +161,7 @@ The **Generate from dates** app mode (and the `autoacquire/` CLI) turns coordina
 - **Timing windows.** Pre-fire scene within 90 days before ignition; post-fire scene at or after containment, bounded by a green-up ceiling (default +90 days, operator-extendable to +180) so a regrown scene doesn't wash out the burn signal. If no clean post-fire scene exists yet, the tool reports a **waiting** state rather than fabricating one.
 - **Cloud gating.** A coarse metadata pre-filter drops tiles over 80% cloud (never the decisive gate). The decisive gate is a per-pixel **box gate**: the combined pre-∩-post valid fraction over the drawn box must be ≥ 0.50 (derived from the pipeline's 20% per-basin NoData fail-loud guard). A scorecard rubric bins each pair Good / OK / Marginal on cloud-over-fire.
 - **Human approval is a separate, mandatory gate.** `select()` proposes and scores; it builds nothing. Nothing becomes a dNBR until a person approves the pair on the scorecard.
+- **Bounded sweep on refusal (A41).** On a per-basin cloud refusal the tool automatically retries the vetted alternate scenes, then the other sensor, under the one approval; the attempt trail is written to sweep_attempts.json.
 
 The failure mode of the whole tool moves here, to scene selection — which is why acquisition is deterministic, auditable, and gated by a human rather than automated end-to-end.
 

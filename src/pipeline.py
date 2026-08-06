@@ -291,6 +291,19 @@ def _dnbr_nodata_flags(basins, nodata_mask):
     return over
 
 
+def _partition_refused(basins, nodata_mask):
+    """A41: split basins at the FROZEN bar (DNBR_NODATA_FAILLOUD_FRAC, strictly '>');
+    attaches b["nodata_frac"] to every record. Refused are never scored/ranked/renumbered."""
+    nd = np.asarray(nodata_mask)
+    clean, refused = [], []
+    for b in basins:
+        m = b["mask"]
+        ncells = int(m.sum())
+        b["nodata_frac"] = float(nd[m].mean()) if ncells else 0.0
+        (refused if b["nodata_frac"] > DNBR_NODATA_FAILLOUD_FRAC else clean).append(b)
+    return clean, refused
+
+
 def _attach_a23_covered_interp(basins, covered_interp):
     """Per-basin covered-interpretation fraction (A23 diagnostic) -- never fed to score/rank."""
     ci = np.asarray(covered_interp)
@@ -399,32 +412,54 @@ def run_pipeline(fire=None, contour_m=None):
         raise GateAbort("run_pipeline: fire provides neither 'sbs' nor 'dnbr' -- no burn input (A8 fail-loud).")
     D = ingest_dnbr_both_arms(dnbr_path, dem_artifacts["profile"])    # both arms, reprojected+aligned to the DEM grid
 
+    # A41 dispatch: flowed basins (creeks present) keep the FROZEN fatal guard verbatim
+    # (pre-reg P2 §4); creeks=None partitions per-basin instead of aborting the run.
+    refused_basins, nodata_warn = [], []
+    if creek_nearest is not None:
+        flowed_ids = {info["basin_id"] for info in creek_nearest.values() if info["dist_m"] <= TRUTH_MATCH_M}
+        guard_basins = [b for b in basins if b["basin_id"] in flowed_ids]
+        unguarded_basins = [b for b in basins if b["basin_id"] not in flowed_ids]
+        _partition_refused(basins, D["nodata_mask"])   # attach nodata_frac only; this path never refuses
+        _dnbr_nodata_guard(guard_basins, D["nodata_mask"])
+        nodata_warn = _dnbr_nodata_flags(unguarded_basins, D["nodata_mask"])   # loud, non-fatal
+        if nodata_warn:
+            _log.warning("dNBR NoData > %.0f%% on %d unguarded non-flowed basin(s) %s -- ranks may be "
+                         "under-scored (cloud read as low burn); NOT aborted (flowed-only P2.3 parity). A P4 "
+                         "truth fire must widen the guard or pre-screen the scene.",
+                         DNBR_NODATA_FAILLOUD_FRAC * 100, len(nodata_warn), [bid for bid, _ in nodata_warn])
+    else:
+        # Partition on the scene-INDEPENDENT geometry, BEFORE the burn filter -- a clouded
+        # burned basin must be REFUSED, not silently dropped by filter_burned_steep (A41).
+        basins, refused_basins = _partition_refused(basins, D["nodata_mask"])
+        # A41 Task 3: refused basins are never scored, so mean_slope must be attached here for
+        # the refused_basins.csv sidecar (nan-safe; all-NaN -> nan, rendered "" by outputs.py).
+        for b in refused_basins:
+            b["mean_slope"] = float(np.nanmean(slope[b["mask"]]))
+        if refused_basins:
+            # A refused basin is ABSENT from the ranking -- never let that shortening be silent.
+            _log.warning("dNBR NoData > %.0f%% on %d basin(s) %s -- REFUSED, not ranked: a clouded "
+                         "basin is a hazard-UNKNOWN basin, not a low-hazard one (A41). They are "
+                         "excluded from the ranking and rendered as refused in outputs from A41 Task 3.",
+                         DNBR_NODATA_FAILLOUD_FRAC * 100, len(refused_basins),
+                         [b["basin_id"] for b in refused_basins])
+        if not basins:
+            raise GateAbort(
+                "FAIL: every basin exceeds the frozen dNBR NoData bar "
+                f"({DNBR_NODATA_FAILLOUD_FRAC:.0%}) -- no clean basin to rank (B1/A41). "
+                "Do NOT emit an empty ranking.", scope="attempt")
+
     if incised:
         # Phase 2 (A39): burn + slope exist only now, so the phase-1 geometry basins are
-        # filtered here. Arm A's weight raster defines the set; Arm B scores that identical set.
+        # filtered here -- on the CLEAN set only (A41). Arm A's weight raster defines the set;
+        # Arm B scores that identical set.
         from src.subbasins import filter_burned_steep
         basins = filter_burned_steep(basins, D["arm_a"]["wt"], slope)
         if not basins:
             raise GateAbort(
                 "FAIL: no sub-basins are both sufficiently burned and steep on incised "
                 "terrain (A39). The burn may not intersect mapped drainage. Do NOT emit an "
-                "empty ranking.")
+                "empty ranking.", scope="attempt")   # A41: cloud -> wt 0 can empty the set; scene-dependent
         outlets = [b["outlet"] for b in basins]   # rebuild from the FINAL (phase-2) basin set
-
-    # dNBR NoData/cloud guard: hard abort on flowed basins when creeks exist, else on ALL basins.
-    if creek_nearest is not None:
-        flowed_ids = {info["basin_id"] for info in creek_nearest.values() if info["dist_m"] <= TRUTH_MATCH_M}
-        guard_basins = [b for b in basins if b["basin_id"] in flowed_ids]
-        unguarded_basins = [b for b in basins if b["basin_id"] not in flowed_ids]
-    else:
-        guard_basins, unguarded_basins = basins, []
-    _dnbr_nodata_guard(guard_basins, D["nodata_mask"])
-    nodata_warn = _dnbr_nodata_flags(unguarded_basins, D["nodata_mask"])   # loud, non-fatal
-    if nodata_warn:
-        _log.warning("dNBR NoData > %.0f%% on %d unguarded non-flowed basin(s) %s -- ranks may be "
-                     "under-scored (cloud read as low burn); NOT aborted (flowed-only P2.3 parity). A P4 "
-                     "truth fire must widen the guard or pre-screen the scene.",
-                     DNBR_NODATA_FAILLOUD_FRAC * 100, len(nodata_warn), [bid for bid, _ in nodata_warn])
 
     # Score BOTH arms on independent copies (A34): Arm A headline, Arm B companion.
     arm_a = _score_one_arm(basins, D["arm_a"]["wt"], D["arm_a"]["covered"], slope, creek_nearest, D["covered_interp"])
@@ -441,6 +476,7 @@ def run_pipeline(fire=None, contour_m=None):
               "hydro": hydro, "outlets": outlets,
               "provenance": provenance, "creeks": creeks, "creek_nearest": creek_nearest,
               "arms": {"arm_a": arm_a, "arm_b": arm_b}, "headline_arm": "arm_a",
+              "refused_basins": refused_basins,   # A41: never scored/ranked; [] on the flowed path
               "dnbr_diag": {"valid": D["valid"], "nodata_mask": D["nodata_mask"],
                             "covered_interp": D["covered_interp"], "nodata_warn_basins": nodata_warn},
               # Arm A (headline) mirrored at top level so uniform consumers (run.py, viewers) work unchanged:

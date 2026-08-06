@@ -15,10 +15,12 @@ Run:  pytest tests/acquire/test_autoacquire_run.py -v
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import date
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,6 +33,9 @@ from autoacquire import dnbr_create as dc  # noqa: E402
 import acquire  # noqa: E402
 from src import pipeline as pl  # noqa: E402
 from src.grids import GateAbort  # noqa: E402
+
+ARGV_COMMON = ["--bbox", "-122.145", "38.455", "-121.985", "38.595",
+               "--ignition", "2026-06-08", "--containment", "2026-06-20"]
 
 BBOX = (-122.145, 38.455, -121.985, 38.595)
 DATES = dict(ignition=date(2026, 6, 8), containment=date(2026, 6, 20))
@@ -95,6 +100,28 @@ def test_approved_happy_path_wires_created_dnbr_into_pipeline(monkeypatch, tmp_p
     assert out["outputs"] == ("r.csv", "b.geojson")
 
 
+def test_ran_path_passes_refused_basins_to_writer(monkeypatch, tmp_path):
+    """A41 fix-wave CRITICAL 1: the legacy run_autoacquire ('ran') path must forward
+    result['refused_basins'] into write_dnbr_outputs -- omitting it on a partly-clouded fire
+    would write clean-looking artifacts with the refused basins silently absent (no banner,
+    no sidecars, no counts)."""
+    monkeypatch.setattr(ss, "select", _Spy(ret=_package()))
+    created = {"dnbr_tif": str(tmp_path / "d.tif"), "quicklook_png": "q",
+               "provenance_json": "p", "gate_stats": {"p99_abs": 0.5}}
+    monkeypatch.setattr(dc, "create_dnbr", _Spy(ret=created))
+    fire = {"name": "x", "dnbr": tmp_path / "d.tif", "out_dir": tmp_path, "dem": "dem.tif"}
+    monkeypatch.setattr(acquire, "build_fire_config", _Spy(ret=fire))
+    refused = [{"basin_id": 7, "nodata_frac": 0.4}]
+    ranked = {"status": "ranked", "arms": {"arm_a": "A", "arm_b": "B"}, "creek_nearest": "C",
+             "refused_basins": refused}
+    monkeypatch.setattr(pl, "run_pipeline", _Spy(ret=ranked))
+    write = _Spy(ret=("r.csv", "b.geojson"))
+    monkeypatch.setattr(ar.outputs, "write_dnbr_outputs", write)
+    out = ar.run_autoacquire(BBOX, out_dir=tmp_path, approve=True, name="x", **DATES)
+    assert out["status"] == "ran"
+    assert write.calls[0][1]["refused"] == refused    # non-empty, reaches the writer
+
+
 def test_incised_sbs_abort_writes_no_ranked_outputs(monkeypatch, tmp_path, incised_fire):
     """A39: incised terrain no longer refuses (the old REFUSED-status fake this test drove can no
     longer happen), so this locks the B1/A28 no-artifacts invariant against the real, reachable
@@ -147,3 +174,141 @@ def test_incised_sbs_abort_propagates_unsoftened(monkeypatch, tmp_path, incised_
     monkeypatch.setattr(acquire, "build_fire_config", _Spy(ret=fire))
     with pytest.raises(GateAbort, match="incised"):
         ar.run_autoacquire(BBOX, out_dir=tmp_path, approve=True, **DATES)
+
+
+# ---------------------------------------------------------------------------
+# Task 8: `--max-swaps` CLI routing + JSON slim (`main()`, patching `ar.sweep.run_sweep`
+# the same way the tests above patch `ss.select` / `dc.create_dnbr` -- the module attribute,
+# not the name `main()` binds locally, so a plain `import autoacquire.sweep` inside
+# autoacquire_run.py is required for this style to actually intercept the call).
+# ---------------------------------------------------------------------------
+
+def _degraded_sweep_result(tmp_path, leak_result=False):
+    ret = {
+        "status": "degraded",
+        "package": {"status": "recommended"},
+        "attempts": [{"sensor": "S2", "pre_id": "P", "post_id": "Q1", "post_date": "2026-07-01",
+                     "outcome": "ranked", "refused_count": 1, "n_basins_total": 5,
+                     "total_nodata_frac": 0.12}],
+        "chosen": {"sensor": "S2", "pre_id": "P", "post_id": "Q1", "post_date": "2026-07-01",
+                  "outcome": "ranked", "refused_count": 1, "n_basins_total": 5,
+                  "total_nodata_frac": 0.12},
+        "refused": [{"phase1_basin_id": 7, "nodata_frac": 0.4}],
+        "result_paths": {"out_dir": str(tmp_path),
+                         "ranking_csv": str(tmp_path / "ranking.csv"),
+                         "basins_geojson": str(tmp_path / "basins.geojson")},
+    }
+    if leak_result:
+        # Defensive case: a hypothetical future caller leaks the raw pipeline result
+        # (with an ndarray mask inside) into the returned dict -- the slim filter must
+        # strip it before it ever reaches json.dumps.
+        ret["result"] = {"arms": {"arm_a": {"basins": [{"mask": np.zeros((2, 2))}]}}}
+    return ret
+
+
+def test_max_swaps_zero_routes_to_legacy_path_and_sweep_is_never_called(monkeypatch, tmp_path):
+    monkeypatch.setattr(ss, "select", _Spy(ret=_package("waiting")))
+    sweep_spy = _Spy()
+    monkeypatch.setattr(ar.sweep, "run_sweep", sweep_spy)
+    out = ar.main(ARGV_COMMON + ["--out", str(tmp_path), "--max-swaps", "0"])
+    assert out["status"] == "waiting"
+    assert sweep_spy.calls == []
+
+
+def test_max_swaps_zero_calls_legacy_with_no_new_kwargs(monkeypatch, tmp_path):
+    legacy_spy = _Spy(ret=_package("waiting"))
+    monkeypatch.setattr(ar, "run_autoacquire", legacy_spy)
+    ar.main(ARGV_COMMON + ["--out", str(tmp_path), "--max-swaps", "0"])
+    assert legacy_spy.calls
+    _, kwargs = legacy_spy.calls[0]
+    assert "contour_m" not in kwargs
+    assert "max_post_swaps" not in kwargs
+
+
+def test_negative_max_swaps_rejected():
+    """A41 fix-wave T8: --max-swaps is a budget, not a signed offset -- argparse must reject a
+    negative value loudly instead of routing to the sweep with a nonsensical budget."""
+    with pytest.raises(SystemExit):
+        ar._parse_args(ARGV_COMMON + ["--out", "x", "--max-swaps", "-1"])
+
+
+def test_default_max_swaps_routes_to_sweep_with_default_budget_and_contour(monkeypatch, tmp_path):
+    sweep_spy = _Spy(ret={"status": "waiting"})
+    monkeypatch.setattr(ar.sweep, "run_sweep", sweep_spy)
+    ar.main(ARGV_COMMON + ["--out", str(tmp_path)])
+    assert sweep_spy.calls
+    _, kwargs = sweep_spy.calls[0]
+    assert kwargs["max_post_swaps"] == 6
+    assert kwargs["contour_m"] == 150.0
+
+
+def test_custom_max_swaps_and_contour_m_pass_through(monkeypatch, tmp_path):
+    sweep_spy = _Spy(ret={"status": "waiting"})
+    monkeypatch.setattr(ar.sweep, "run_sweep", sweep_spy)
+    ar.main(ARGV_COMMON + ["--out", str(tmp_path), "--max-swaps", "3", "--contour-m", "75.5"])
+    _, kwargs = sweep_spy.calls[0]
+    assert kwargs["max_post_swaps"] == 3
+    assert kwargs["contour_m"] == 75.5
+
+
+def test_approve_flag_passes_through_to_sweep(monkeypatch, tmp_path):
+    sweep_spy = _Spy(ret={"status": "waiting"})
+    monkeypatch.setattr(ar.sweep, "run_sweep", sweep_spy)
+    ar.main(ARGV_COMMON + ["--out", str(tmp_path), "--approve"])
+    _, kwargs = sweep_spy.calls[0]
+    assert kwargs["approve"] is True
+
+
+def test_unapproved_sweep_prints_recommendation_like_legacy(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(ar.sweep, "run_sweep", _Spy(ret=_package()))
+    ar.main(ARGV_COMMON + ["--out", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "pre : P" in out
+    assert "Re-run with --approve" in out
+
+
+def test_degraded_sweep_prints_chosen_and_refused_count(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(ar.sweep, "run_sweep",
+                        _Spy(ret=_degraded_sweep_result(tmp_path)))
+    ar.main(ARGV_COMMON + ["--out", str(tmp_path), "--approve"])
+    out = capsys.readouterr().out
+    assert "Q1" in out
+    assert "1 basin(s) refused" in out
+    assert "refused_basins.csv" in out          # hazard-unknown pointer (degraded only)
+
+
+def test_clean_sweep_prints_chosen_without_hazard_pointer(monkeypatch, tmp_path, capsys):
+    clean = _degraded_sweep_result(tmp_path)
+    clean["status"] = "clean"
+    clean["chosen"]["refused_count"] = 0
+    clean["refused"] = []
+    monkeypatch.setattr(ar.sweep, "run_sweep", _Spy(ret=clean))
+    ar.main(ARGV_COMMON + ["--out", str(tmp_path), "--approve"])
+    out = capsys.readouterr().out
+    assert "0 basin(s) refused" in out
+    assert "refused_basins.csv" not in out
+
+
+def test_aborted_sweep_prints_message_and_attempt_count(monkeypatch, tmp_path, capsys):
+    aborted = {"status": "aborted", "package": {"status": "recommended"},
+              "attempts": [{"sensor": "S2"}, {"sensor": "S2"}],
+              "message": "no attempt produced a ranking; see attempts."}
+    monkeypatch.setattr(ar.sweep, "run_sweep", _Spy(ret=aborted))
+    ar.main(ARGV_COMMON + ["--out", str(tmp_path), "--approve"])
+    out = capsys.readouterr().out
+    assert "no attempt produced a ranking" in out
+    assert "2" in out
+
+
+def test_degraded_sweep_result_json_round_trips_with_no_result_key(monkeypatch, tmp_path):
+    monkeypatch.setattr(ar.sweep, "run_sweep",
+                        _Spy(ret=_degraded_sweep_result(tmp_path, leak_result=True)))
+    ar.main(ARGV_COMMON + ["--out", str(tmp_path), "--approve"])
+    text = (tmp_path / "autoacquire_result.json").read_text()
+    assert "array(" not in text
+    parsed = json.loads(text)               # must not raise
+    assert "result" not in parsed
+    assert "pipeline" not in parsed
+    assert "masks" not in parsed
+    assert parsed["status"] == "degraded"
+    assert isinstance(parsed["chosen"]["post_date"], str)

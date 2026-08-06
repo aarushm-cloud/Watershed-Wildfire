@@ -129,7 +129,7 @@ def test_accepted_fire_schema_is_unchanged(tmp_path):
         "basin_id", "rank", "score", "rank_b", "score_b", "rank_delta",
         "mean_burn_a", "mean_burn_b", "mean_slope", "slope_coverage_frac",
         "low_slope_coverage", "area_km2", "burn_coverage_frac", "low_coverage",
-        "flowed", "matched_creek", "nearest_outlet_dist_m",
+        "flowed", "matched_creek", "nearest_outlet_dist_m", "nodata_frac",
     ]
     assert not any("EXPLORATORY" in h for h in header), \
         "an accepted fire must never carry the incised disclaimer"

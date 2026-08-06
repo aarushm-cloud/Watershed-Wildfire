@@ -14,15 +14,20 @@ if str(_REPO_ROOT) not in sys.path:
 
 def _writer_call_sites():
     import app, run
-    from autoacquire import autoacquire_run
+    from autoacquire import autoacquire_run, sweep
     return {"app.run_screening": inspect.getsource(app.run_screening),
             "app.run_generated_screening": inspect.getsource(app.run_generated_screening),
             "autoacquire_run": inspect.getsource(autoacquire_run),
-            "run.py": inspect.getsource(run)}
+            "run.py": inspect.getsource(run),
+            # A41 (Task 7 review F2): the Generate path's REAL writer call moved here
+            # (sweep.py's nested _run_attempt) once app.run_generated_screening became a thin
+            # sweep-backed wrapper -- inspect.getsource(run_sweep) still walks the nested
+            # closure's source text, so this call site is not silently unguarded.
+            "autoacquire.sweep.run_sweep": inspect.getsource(sweep.run_sweep)}
 
 
 @pytest.mark.parametrize("name", ["app.run_screening", "app.run_generated_screening",
-                                  "autoacquire_run", "run.py"])
+                                  "autoacquire_run", "run.py", "autoacquire.sweep.run_sweep"])
 def test_every_writer_call_site_passes_incised(name):
     """A static check: each site that calls write_dnbr_outputs must pass incised=."""
     src = _writer_call_sites()[name]

@@ -7,6 +7,7 @@ or re-decides the burn source.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -138,20 +139,49 @@ INCISED_FRAMING = (
 )
 
 
+def _refusal_reason(nodata_frac):
+    """The fixed refusal-reason string (A41), shared by the CSV and GeoJSON sidecars."""
+    return f"dNBR NoData {nodata_frac:.0%} > 20% (cloud/scene-edge)"
+
+
+def _mask_features(records, transform, crs, props):
+    """Vectorise each record's boolean mask -> polygon (the same rasterio.features.shapes call,
+    transform and CRS basins.geojson uses), pair with caller-built props, reproject to
+    EPSG:4326. Shared by the clean and refused GeoJSON writers so geometry can never diverge
+    (A41)."""
+    geoms = []
+    for r in records:
+        mask = r["mask"].astype(np.uint8)
+        polys = [shapely_shape(geom) for geom, val in
+                 rfeatures.shapes(mask, mask=r["mask"], transform=transform) if val == 1]
+        geoms.append(unary_union(polys))
+    return gpd.GeoDataFrame(props, geometry=geoms, crs=crs).to_crs("EPSG:4326")
+
+
 def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
-                       validation_case, incised=False, subbasin_meta=None):
+                       validation_case, incised=False, subbasin_meta=None,
+                       refused=None, imagery=None):
     """Write {out_dir}/{ranking.csv, basins.geojson} for the dNBR both-arms path (A34): Arm A
     headline (rank/score), Arm B companion (rank_b/score_b), rank_delta uncertainty flag.
     validation_case is REQUIRED (no default -- a direct caller must not silently stamp
-    "Montecito"). incised=True appends intensity companion columns + INCISED_FRAMING (A39/A40)."""
+    "Montecito"). incised=True appends intensity companion columns + INCISED_FRAMING (A39/A40).
+
+    refused (A41 Task 3): result["refused_basins"] records, or None/[] on a clean run. ALL
+    refusal rendering (sidecars, banner, provenance counts) is gated strictly on `if refused:`,
+    so a zero-refused run's pre-existing output is untouched (projection-identity) apart from
+    the always-on nodata_frac column. imagery: optional {sensor, pre_id, pre_date, post_id,
+    post_date} -> one header line (A21); omitted (None) on paths with no pair provenance."""
     if not arm_a["basins"]:                            # F9: never emit an empty artifact (A8 fail-loud)
         raise ValueError("write_dnbr_outputs: refusing to write outputs for 0 basins -- the "
                          "delineation produced none; an empty ranking is indistinguishable from a "
                          "broken run (A8 fail-loud).")
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Purge superseded-run debris: a stale incised map must never sit beside accepted output.
+    # Purge superseded-run debris: a stale incised map or refusal sidecar must never sit beside
+    # accepted/clean output.
     (out_dir / "refusal.json").unlink(missing_ok=True)
     (out_dir / DUAL_RANK_MAP_NAME).unlink(missing_ok=True)
+    (out_dir / "refused_basins.csv").unlink(missing_ok=True)
+    (out_dir / "refused_basins.geojson").unlink(missing_ok=True)
     b_by = {b["basin_id"]: b for b in arm_b["basins"]}
 
     nearest_by_basin = {}
@@ -181,12 +211,23 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
             "flowed": a.get("flowed", False), "matched_creek": a.get("matched_creek", ""),
             "nearest_outlet_dist_m": round(near[1], 1) if near[1] is not None else "",
         }
+        nd = a.get("nodata_frac")   # A41: present since Task 2; "" fallback for hand-built test basins
+        row["nodata_frac"] = round(nd, 4) if nd is not None else ""
         if incised:   # A39: appended LAST -- pandas headers follow dict insertion order
             row["intensity"] = round(a.get("intensity"), 6)   # score-family precision (score/score_b)
             row["intensity_rank"] = int(a.get("intensity_rank"))
         rows.append(row)
     # A40: incised rows stay in the frozen `rank` order from the loop above (headline = score, same as
     # range-front); intensity/intensity_rank ride along as companion columns, no re-sort.
+    banner = None
+    if refused:
+        # A41: M is the visible universe on THIS map (ranked + refused); on incised fires the
+        # refused ids are phase-1-denominated (see the refused_basins sidecar note below).
+        n_refused, m_total = len(refused), len(rows) + len(refused)
+        banner = (f"{n_refused} of {m_total} basins could not be assessed (insufficient "
+                 "cloud-free imagery). Their hazard is UNKNOWN -- not low. Any refused basin "
+                 "could rank high if data existed; see refused_basins.csv.")
+
     df = pd.DataFrame(rows)
     csv_path = out_dir / "ranking.csv"
     with open(csv_path, "w") as fh:
@@ -197,20 +238,23 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
         if incised:
             fh.write(f"# {INCISED_FRAMING}\n")
         fh.write(f"# burn_source=dNBR  validation_case={validation_case}\n")
+        if imagery:   # A21: winning-pair provenance; absent on paths with no scene pair (upload)
+            fh.write(f"# imagery: {imagery['sensor']} pre {imagery['pre_id']} "
+                     f"({imagery['pre_date']}) -> post {imagery['post_id']} "
+                     f"({imagery['post_date']})\n")
+        if banner:
+            fh.write(f"# {banner}\n")
         df.to_csv(fh, index=False)
 
     # basins.geojson: vectorise each Arm A basin mask, reproject to EPSG:4326, both-arm properties.
     with rasterio.open(dem_tif) as s:
         transform = s.transform
         dem_crs = s.crs              # A25: per-fire CRS read off the DEM handle (not a constant)
-    geoms, props = [], []
-    for a in sorted(arm_a["basins"], key=lambda x: x["rank"]):
+    ordered_basins = sorted(arm_a["basins"], key=lambda x: x["rank"])
+    props = []
+    for a in ordered_basins:
         bid = a["basin_id"]
         b = b_by[bid]
-        mask = a["mask"].astype(np.uint8)
-        polys = [shapely_shape(geom) for geom, val in
-                 rfeatures.shapes(mask, mask=a["mask"], transform=transform) if val == 1]
-        geoms.append(unary_union(polys))
         feat_props = {"basin_id": bid, "rank": a["rank"], "score": round(a["score"], 6),
                       "rank_b": b["rank"], "score_b": round(b["score"], 6),
                       "rank_delta": abs(a["rank"] - b["rank"]),
@@ -226,7 +270,7 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
             feat_props["intensity"] = round(a.get("intensity"), 6)   # score-family precision (score/score_b)
             feat_props["intensity_rank"] = int(a.get("intensity_rank"))
         props.append(feat_props)
-    gdf = gpd.GeoDataFrame(props, geometry=geoms, crs=dem_crs).to_crs("EPSG:4326")
+    gdf = _mask_features(ordered_basins, transform, dem_crs, props)   # A41: shared geometry path
     gj_path = out_dir / "basins.geojson"
     gdf.to_file(gj_path, driver="GeoJSON")
     with open(gj_path) as fh:
@@ -242,21 +286,54 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
             provenance["wbt_version"] = subbasin_meta.get("wbt_version")
             provenance["acc_threshold_cells"] = subbasin_meta.get("acc_threshold_cells")
             provenance["breach_dist_cells"] = subbasin_meta.get("breach_dist_cells")
+
+    # A41: basins.geojson stays CLEAN-ONLY; refused geometry gets its own sidecar. On incised
+    # fires phase1_basin_id is NOT basin_id's id space (renumbered clean ids can collide by
+    # value) -- never join the two on id; geometry is the authoritative join.
+    refused_gj_path = out_dir / "refused_basins.geojson"
+    if refused:
+        provenance["refused_count"] = len(refused)
+        provenance["n_basins_total"] = len(rows) + len(refused)
+        refused_sorted = sorted(refused, key=lambda r: r["basin_id"])
+        refused_props = [{"phase1_basin_id": r["basin_id"],
+                          "nodata_frac": round(r["nodata_frac"], 4),
+                          "reason": _refusal_reason(r["nodata_frac"])} for r in refused_sorted]
+        _mask_features(refused_sorted, transform, dem_crs, refused_props).to_file(
+            refused_gj_path, driver="GeoJSON")
+
+        refused_rows = []
+        for r in refused_sorted:
+            # area_km2 is attached at delineation time (stage_2c_delineate / build_geometry_
+            # records), BEFORE the partition -- every refused record has it. Read directly;
+            # a missing key is a broken invariant upstream, not a gap to paper over here.
+            ms = r.get("mean_slope")
+            ms_val = "" if ms is None or np.isnan(ms) else round(ms, 4)
+            refused_rows.append({"phase1_basin_id": r["basin_id"],
+                                 "nodata_frac": round(r["nodata_frac"], 4),
+                                 "reason": _refusal_reason(r["nodata_frac"]),
+                                 "area_km2": round(r["area_km2"], 4), "mean_slope": ms_val})
+        pd.DataFrame(refused_rows).to_csv(out_dir / "refused_basins.csv", index=False)
+
     fc["provenance"] = provenance
     with open(gj_path, "w") as fh:
         json.dump(fc, fh)
     if incised:   # A39 product artifact: the dual-rank map travels ONLY on incised output
-        write_dual_rank_map(gj_path, dem_tif, out_dir / DUAL_RANK_MAP_NAME, validation_case)
+        write_dual_rank_map(gj_path, dem_tif, out_dir / DUAL_RANK_MAP_NAME, validation_case,
+                            refused_gj_path=refused_gj_path)
     return csv_path, gj_path
 
 
-def write_dual_rank_map(gj_path, dem_path, out_png, fire_label, top_n=8):
+def write_dual_rank_map(gj_path, dem_path, out_png, fire_label, top_n=8, refused_gj_path=None):
     """Static dual-rank PNG for the incised path (A39/A40): score-rank panel (headline) beside
-    intensity-rank panel, over a DEM hillshade, exploratory framing in the footer. Deterministic."""
+    intensity-rank panel, over a DEM hillshade, exploratory framing in the footer. Deterministic.
+
+    refused_gj_path (A41 Task 3): refused_basins.geojson sidecar -- drawn as a gray cross-hatch
+    layer with a legend entry ONLY when the file exists (a clean run's path was never written)."""
     import matplotlib
     matplotlib.use("Agg")   # headless render; never a GUI backend
     import matplotlib.pyplot as plt
     from matplotlib.colors import LightSource
+    from matplotlib.patches import Patch
 
     with rasterio.open(dem_path) as s:
         dem = s.read(1).astype("float64")
@@ -274,6 +351,11 @@ def write_dual_rank_map(gj_path, dem_path, out_png, fire_label, top_n=8):
 
     gdf = gpd.read_file(gj_path).to_crs(dem_crs)   # writer stored EPSG:4326; draw metric
     n = len(gdf)
+    refused_gdf = None
+    if refused_gj_path is not None and Path(refused_gj_path).exists():
+        refused_gdf = gpd.read_file(refused_gj_path).to_crs(dem_crs)
+        if refused_gdf.empty:
+            refused_gdf = None
     # size the figure from the DEM aspect (panels draw with equal metric aspect) so tall or wide
     # extents don't leave dead whitespace; clamped so a degenerate extent can't blow the canvas
     panel_h = min(max(8.0 * (extent[3] - extent[2]) / (extent[1] - extent[0]), 3.0), 10.0)
@@ -293,9 +375,16 @@ def write_dual_rank_map(gj_path, dem_path, out_png, fire_label, top_n=8):
                 ax.text(pt.x, pt.y, str(int(row[col])), ha="center", va="center", fontsize=9,
                         fontweight="bold", color="black", zorder=5,
                         bbox=dict(boxstyle="circle,pad=0.25", fc="white", ec="black", alpha=0.9))
+            if refused_gdf is not None:   # A41: hazard-unknown, never absence-reads-as-safe
+                refused_gdf.plot(ax=ax, facecolor="none", edgecolor="dimgray", hatch="////",
+                                 linewidth=0.6, zorder=4)
             ax.set_title(title)
             ax.set_xlabel("Easting (m)")
         axes[0].set_ylabel("Northing (m)")
+        if refused_gdf is not None:
+            legend_patch = Patch(facecolor="none", edgecolor="dimgray", hatch="////",
+                                 label="refused -- insufficient data (hazard unknown)")
+            axes[1].legend(handles=[legend_patch], loc="lower right", fontsize=7, framealpha=0.85)
         fig.suptitle(f"{fire_label} — EXPLORATORY (incised terrain, A39) | {n} sub-basins",
                      fontsize=14)
         # degradation contract: split on the sentence boundary ". " (not the first raw "."), so a

@@ -15,7 +15,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import acquire  # noqa: E402
-from autoacquire import dnbr_create, scene_select  # noqa: E402
+from autoacquire import dnbr_create, scene_select, sweep  # noqa: E402
 from src import outputs, pipeline  # noqa: E402
 
 
@@ -47,14 +47,13 @@ def run_autoacquire(bbox, *, ignition, containment, out_dir, name="fire",
             validation_case=f"{name} (auto-acquire, dNBR both-arms)",
             incised=(result.get("terrain_mode") == "incised"),
             subbasin_meta=result.get("subbasin_meta"),
+            refused=result.get("refused_basins"),   # A41 fix-wave CRITICAL 1: never drop refusals silently
         )
     return ran
 
 
-if __name__ == "__main__":
+def _parse_args(argv=None):
     import argparse
-    import json
-    from datetime import date
 
     ap = argparse.ArgumentParser(
         description="Auto-acquire dNBR end-to-end driver (AA-3; approval-gated)"
@@ -65,17 +64,42 @@ if __name__ == "__main__":
     ap.add_argument("--out", required=True, help="output directory")
     ap.add_argument("--name", default="fire")
     ap.add_argument("--greenup-days", type=int, default=scene_select.GREENUP_DEFAULT_DAYS)
+    ap.add_argument("--max-swaps", type=int, default=sweep.MAX_POST_SWAPS,
+                    help="post-scene swap budget for the sweep path; 0 = legacy "
+                         "single-attempt run with no sensor fallback (default: %(default)s)")
+    ap.add_argument("--contour-m", type=float, default=150.0,
+                    help="contour interval in meters, sweep path only (default: %(default)s)")
     ap.add_argument("--approve", action="store_true",
                     help="explicitly approve the recommended pair and run the pipeline")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    if args.max_swaps < 0:                     # A41 fix-wave T8: budget, not a signed offset
+        ap.error("--max-swaps must be >= 0")
+    return args
 
-    out = run_autoacquire(
-        tuple(args.bbox),
-        ignition=date.fromisoformat(args.ignition),
-        containment=date.fromisoformat(args.containment),
-        out_dir=Path(args.out), name=args.name,
-        greenup_days=args.greenup_days, approve=args.approve,
-    )
+
+def main(argv=None):
+    import json
+    from datetime import date
+
+    args = _parse_args(argv)
+
+    if args.max_swaps == 0:
+        out = run_autoacquire(
+            tuple(args.bbox),
+            ignition=date.fromisoformat(args.ignition),
+            containment=date.fromisoformat(args.containment),
+            out_dir=Path(args.out), name=args.name,
+            greenup_days=args.greenup_days, approve=args.approve,
+        )
+    else:
+        out = sweep.run_sweep(
+            tuple(args.bbox),
+            ignition=date.fromisoformat(args.ignition),
+            containment=date.fromisoformat(args.containment),
+            out_dir=Path(args.out), name=args.name,
+            greenup_days=args.greenup_days, max_post_swaps=args.max_swaps,
+            contour_m=args.contour_m, approve=args.approve,
+        )
 
     if out["status"] == "recommended":
         pair = out["pair"]
@@ -86,6 +110,22 @@ if __name__ == "__main__":
     elif out["status"] == "ran":
         print("pipeline:", out["pipeline"].get("status"))
         print("dNBR:", out["created"]["dnbr_tif"])
+        # A41 fix-wave CRITICAL 1: surface refusals on the legacy "ran" path too
+        print(f"{len(out['pipeline'].get('refused_basins', []) or [])} basin(s) refused")
+    elif out["status"] in ("clean", "degraded"):
+        chosen = out["chosen"]
+        print(f"pre : {chosen['pre_id']}")
+        print(f"post: {chosen['post_id']} ({chosen['post_date']})")
+        refused = out.get("refused", [])
+        print(f"{len(refused)} basin(s) refused")
+        if out["status"] == "degraded":
+            print(f"{len(refused)} of {chosen['n_basins_total']} basins could not be "
+                  "assessed (insufficient cloud-free imagery). Their hazard is UNKNOWN "
+                  "-- not low. Any refused basin could rank high if data existed; see "
+                  "refused_basins.csv.")
+    elif out["status"] == "aborted":
+        print(out.get("message", ""))
+        print(f"attempts: {len(out.get('attempts', []))}")
     else:
         print(out["status"] + ":", out.get("message", ""))
 
@@ -94,7 +134,12 @@ if __name__ == "__main__":
         return o.isoformat() if isinstance(o, _d) else str(o)
 
     (Path(args.out) / "autoacquire_result.json").parent.mkdir(parents=True, exist_ok=True)
-    slim = {k: v for k, v in out.items() if k not in ("pipeline", "masks")}
+    slim = {k: v for k, v in out.items() if k not in ("pipeline", "masks", "result")}
     Path(args.out, "autoacquire_result.json").write_text(
         json.dumps(slim, default=_js, indent=2)
     )
+    return out
+
+
+if __name__ == "__main__":
+    main()

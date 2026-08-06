@@ -86,6 +86,8 @@ dNBR ──────> ingest.ingest_dnbr_both_arms (both arms; incised: subba
 
 The `dNBR` input at the left edge is either **uploaded** by the user or **auto-acquired** from public Sentinel-2 / Landsat imagery by the `autoacquire/` subsystem — deterministic scene selection + NBR band math, human-approved — entering at the same `ingest_dnbr_both_arms` seam either way (§7).
 
+Basins whose dNBR NoData/cloud exceeds the frozen 20% bar are refused individually ("insufficient data" -- hazard unknown, not low) and listed in refused_basins.csv; the ranking covers clean basins only (A41).
+
 **Key design principle.** Two things are load-bearing and neither is negotiable.
 
 1. **The formula is frozen.** `mean_burn × mean_slope × contributing_area_km²` was pre-registered and validated. Changing the term order, the evaluation order, `BURN_WEIGHTS`, the dNBR bin/clamp/floor constants, or `DIRMAP`/`D8_OFFSETS` re-opens validation. These are the "category-two frozen fence." The known `× area` mis-ranking (a large moderately-burned basin can outrank a small severely-burned flowed one) is tracked as decision **C1** and deliberately left un-tuned.

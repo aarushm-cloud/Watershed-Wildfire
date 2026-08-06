@@ -269,13 +269,14 @@ def assert_raw_dnbr(dnbr_path) -> dict:
             "valid_frac": round(float(physical.size / total), 4), "n_fill_sentinel": n_sentinel}
 
 
-def build_fire_config(bbox, dnbr_path, out_dir, name: str = "fire", *, buf_deg: float = 0.012) -> dict:
-    """(bbox lon/lat + uploaded dNBR) -> staged files + the fire dict run_pipeline consumes
-    (sbs=None -> the dNBR both-arms path). Scale guard first, then fetches; writes a manifest."""
+def stage_fire(bbox, out_dir, *, name: str = "fire", buf_deg: float | None = None) -> dict:
+    """(bbox lon/lat) -> staged DEM + buildings + a fire dict awaiting a dNBR (A41: the sweep seam
+    -- stage once per fire, attach_dnbr per attempt). fire["dnbr"] is None until attach_dnbr runs;
+    the manifest is written dnbr-less (dnbr_upload: null is an intentional half-state)."""
     west, south, east, north = bbox
     out_dir = Path(out_dir)
-    # F7 front-door AOI cap -- cheapest check first, before even the dNBR read. A mis-drawn
-    # state/CONUS-scale box passes lon/lat validation but would enumerate hundreds of 3DEP tiles.
+    # F7 front-door AOI cap -- cheapest check first. A mis-drawn state/CONUS-scale box passes
+    # lon/lat validation but would enumerate hundreds of 3DEP tiles.
     area_deg2 = (east - west) * (north - south)
     if area_deg2 > MAX_BBOX_DEG2:
         raise GateAbort(
@@ -284,7 +285,6 @@ def build_fire_config(bbox, dnbr_path, out_dir, name: str = "fire", *, buf_deg: 
             "fetched. Draw a box around ONE fire's burn area -- or, if this genuinely is a single "
             "megafire scar, raising acquire.MAX_BBOX_DEG2 is an owner decision (plumbing bound, not "
             "science) (A8/F7).")
-    dnbr_stats = assert_raw_dnbr(dnbr_path)                     # CF-9 guard before any fetch
     grid = canonical_grid(west, south, east, north)            # CF-6: lon/lat -> UTM 10 m grid
     # F7 front-door zone check -- the pipeline ingests only ALLOWED_UTM_ZONES: now the whole CONUS
     # coverage (UTM 10N-19N, A37). Without this, an out-of-coverage bbox pays the full DEM+buildings
@@ -296,6 +296,7 @@ def build_fire_config(bbox, dnbr_path, out_dir, name: str = "fire", *, buf_deg: 
             f"(UTM 10N-19N = EPSG 32610-32619, A37). It screens contiguous-US fires on 3DEP terrain; "
             "Alaska/Hawaii/non-US is out of coverage -- extending it is an owner edit to "
             "src/config.ALLOWED_UTM_ZONES (A8/F7).")
+    buf_deg = 0.012 if buf_deg is None else buf_deg           # A41: mirrors fetch_buildings' own default
     stage = out_dir / "inputs"
     dem_path = fetch_dem(bbox, grid, stage / "dem.tif")        # CF-7 (module-level -> monkeypatchable)
     assets_path, n_buildings = fetch_buildings(bbox, grid.crs, stage / "buildings.gpkg", buf_deg=buf_deg)  # CF-8
@@ -304,15 +305,44 @@ def build_fire_config(bbox, dnbr_path, out_dir, name: str = "fire", *, buf_deg: 
         "name": name,
         "dem": dem_path,
         "sbs": None,                     # dNBR-only fire (A34/A29): no BAER SBS for an un-assessed fire
-        "dnbr": Path(dnbr_path),         # the uploaded raster, carried unmodified (raw scale, guarded)
+        "dnbr": None,                     # A41: attach_dnbr fills this in
         "assets": assets_path,
         "creeks": None,                  # a new un-assessed fire has no ground-truth creek layer
         "out_dir": out_dir,
         "expected_crs": grid.crs,        # per-fire UTM zone derived from the bbox (A25)
         "validation_case": None,         # not a validation reconstruction (A30)
     }
-    _write_manifest(out_dir, name, bbox, grid, dnbr_stats, n_buildings)
+    _write_manifest(out_dir, name, bbox, grid, None, n_buildings)   # dnbr_upload filled by attach_dnbr
     return fire
+
+
+def attach_dnbr(fire: dict, dnbr_path) -> dict:
+    """Validate + attach an uploaded dNBR to a fire staged by stage_fire (A41). CF-9 guard: the
+    raw-scale check runs before dnbr is used for anything. Completes the manifest stage_fire left
+    dnbr-less by rewriting the same manifest file with dnbr_upload filled in."""
+    dnbr_stats = assert_raw_dnbr(dnbr_path)                     # CF-9 guard before any dNBR use
+    fire["dnbr"] = Path(dnbr_path)                               # the uploaded raster, carried unmodified
+    manifest_path = Path(fire["out_dir"]) / "acquisition_manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError) as e:   # A41: fail loud, not a bare traceback --
+        # every other acquire.py precondition raises GateAbort, this one should too.
+        raise GateAbort(
+            f"FAIL: no acquisition manifest at {manifest_path} -- stage_fire never ran for this "
+            "out_dir (or its manifest is corrupt). attach_dnbr completes a manifest stage_fire "
+            "already staged; it does not create one from scratch (A8/A41).") from e
+    manifest["dnbr_upload"] = dnbr_stats
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    return fire
+
+
+def build_fire_config(bbox, dnbr_path, out_dir, name: str = "fire", *, buf_deg: float = 0.012) -> dict:
+    """(bbox lon/lat + uploaded dNBR) -> staged files + the fire dict run_pipeline consumes
+    (sbs=None -> the dNBR both-arms path). CF-9 guard first, before any fetch (byte-equivalent to
+    pre-A41 behavior for this caller); attach_dnbr re-validates cheaply, harmlessly (A41 split)."""
+    assert_raw_dnbr(dnbr_path)                                  # CF-9 guard before any fetch (unchanged)
+    fire = stage_fire(bbox, out_dir, name=name, buf_deg=buf_deg)
+    return attach_dnbr(fire, dnbr_path)
 
 
 def _write_manifest(out_dir: Path, name, bbox, grid: GridSpec, dnbr_stats, n_buildings):

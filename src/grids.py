@@ -12,6 +12,13 @@ from src.config import CANONICAL_CRS, ALLOWED_UTM_ZONES
 class GateAbort(RuntimeError):
     """Raised when a stage precondition is violated -- fail loud, never degrade (FM-10)."""
 
+    def __init__(self, message, *, scope="fire"):
+        # A41: "fire" = deterministic for this fire, a sweep must stop loud (the default,
+        # so unclassified aborts are never silently retried past); "attempt" = scene-pair-
+        # dependent, a sweep may record it and try the next vetted pair.
+        super().__init__(message)
+        self.scope = scope
+
 
 def _assert_metric_crs(layer_crs, name: str) -> None:
     """Fail loud unless `layer_crs` is an allowed metric UTM zone -- never compute distances in degrees."""

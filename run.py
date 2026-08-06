@@ -55,9 +55,12 @@ def run_fire(fire):
                 result["arms"]["arm_a"], result["arms"]["arm_b"], result["creek_nearest"],
                 fire["out_dir"], fire["dem"], validation_case=fire["validation_case"],
                 incised=(result.get("terrain_mode") == "incised"),
-                subbasin_meta=result.get("subbasin_meta"))
-            n = len(result["arms"]["arm_a"]["basins"])
-            print(f"[{fire['name']}] ranked (dNBR both-arms): {n} basins; wrote {csv_path} , {gj_path}")
+                subbasin_meta=result.get("subbasin_meta"),
+                refused=result.get("refused_basins"))
+            ranked = result["arms"]["arm_a"]["basins"]
+            print(f"[{fire['name']}] {len(ranked)} ranked, "
+                 f"{len(result.get('refused_basins', []))} refused (insufficient cloud-free "
+                 f"data); wrote {csv_path} , {gj_path}")
         else:
             csv_path, gj_path, _ = write_outputs(
                 result["basins"], result["creek_nearest"], fire["out_dir"], fire["dem"],

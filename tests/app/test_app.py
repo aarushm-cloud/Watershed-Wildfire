@@ -334,6 +334,41 @@ def test_run_screening_ranked_success_path(monkeypatch, tmp_path):
     assert screen["fc"]["type"] == "FeatureCollection" and screen["csv"].startswith(b"# spine")
 
 
+def test_run_screening_passes_refused_basins_through_and_reads_the_sidecar(monkeypatch, tmp_path):
+    """A41: refusals must render on the Upload path too, not just Generate/sweep. Pins BOTH
+    halves of the wiring -- write_dnbr_outputs receives refused=, and if it drops a
+    refused_basins.geojson sidecar, run_screening reads it back into screen['refused_geojson']."""
+    import acquire
+    from src import pipeline as pl
+    from src import outputs as outs
+    refused_basins = [{"basin_id": 7, "nodata_frac": 0.9}]
+    ranked = {"status": "ranked", "headline_arm": "arm_a", "provenance": {"burn_source": "dNBR"},
+              "arms": {"arm_a": {"basins": [{"basin_id": 0}]}, "arm_b": {"basins": []}},
+              "creek_nearest": None, "refused_basins": refused_basins}
+    gj = tmp_path / "basins.geojson"; gj.write_text(json.dumps(_fc(_feature("b0", 1, 1))))
+    cp = tmp_path / "ranking.csv"; cp.write_bytes(b"# spine\nbasin_id,rank\n0,1\n")
+    monkeypatch.setattr(acquire, "build_fire_config",
+                        lambda bbox, path, out_dir, **k: {"name": "t", "out_dir": out_dir, "dem": "x"})
+    monkeypatch.setattr(pl, "run_pipeline", lambda fire, **k: ranked)
+    write_calls = []
+
+    def _fake_write(*a, **k):
+        write_calls.append(k)
+        # fire["out_dir"] is run_screening's OWN real mkdtemp'd dir (arg index 3) -- the sidecar
+        # must land there, exactly where write_dnbr_outputs would really drop it (A41 Task 3).
+        (Path(a[3]) / "refused_basins.geojson").write_text(json.dumps(_fc(_feature("p7", 99, 99))))
+        (Path(a[3]) / "refused_basins.csv").write_bytes(b"phase1_basin_id,nodata_frac\n7,0.9\n")
+        return cp, gj
+    monkeypatch.setattr(outs, "write_dnbr_outputs", _fake_write)
+    screen = app.run_screening(SFK_BBOX, _FakeUpload())
+    assert screen["kind"] == "ranked"
+    assert write_calls[0]["refused"] is refused_basins           # passed through untouched
+    assert screen["refused_geojson"]["features"][0]["properties"]["basin_id"] == "p7"
+    # F3: refused_basins.csv must be read into bytes BEFORE run_screening's finally rmtree --
+    # the degraded banner tells the user to consult exactly this file.
+    assert screen["refused_csv"] == b"phase1_basin_id,nodata_frac\n7,0.9\n"
+
+
 def test_run_screening_threads_operator_contour_to_pipeline(monkeypatch):
     # Regression lock (B2): the per-fire mountain-front contour must reach run_pipeline
     # (a bad merge once dropped the whole contour input; this pins the Upload-path threading).
@@ -588,6 +623,40 @@ def test_non_incised_render_offers_no_map_download():
     labels = [d.label for d in at.get("download_button")]
     assert any("ranking.csv" in lbl for lbl in labels)
     assert not any("map" in lbl.lower() for lbl in labels), labels
+
+
+# ---- Review fix F3: refused_basins.csv download button (path-agnostic -- upload path here) -------
+
+def test_degraded_upload_render_offers_refused_csv_download():
+    """A degraded upload result (provenance.refused_count set) must offer a
+    refused_basins.csv download alongside ranking.csv -- the banner names that exact file."""
+    from streamlit.testing.v1 import AppTest
+    fc = _fc(_feature("b1", rank=1, rank_b=1))
+    fc["provenance"] = {"refused_count": 1, "n_basins_total": 2}
+    at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90)
+    at.session_state["screen"] = {
+        "kind": "ranked", "fc": fc, "n": 1, "incised": False,
+        "csv": b"# ranking\nbasin_id,rank\nb1,1\n",
+        "refused_csv": b"phase1_basin_id,nodata_frac\n7,0.9\n",
+        "inputs": app.screen_inputs_key(*_APP_DEFAULT_BBOX, None),
+    }
+    at.run()
+    assert not at.exception, at.exception
+    labels = [d.label for d in at.get("download_button")]
+    assert any("refused_basins.csv" in lbl for lbl in labels), labels
+
+
+def test_clean_upload_render_offers_no_refused_csv_download():
+    from streamlit.testing.v1 import AppTest
+    fc = _fc(_feature("b1", rank=1, rank_b=1))
+    at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90)
+    at.session_state["screen"] = {"kind": "ranked", "fc": fc, "n": 1, "incised": False,
+                                  "csv": b"# ranking\nbasin_id,rank\nb1,1\n",
+                                  "inputs": app.screen_inputs_key(*_APP_DEFAULT_BBOX, None)}
+    at.run()
+    assert not at.exception, at.exception
+    labels = [d.label for d in at.get("download_button")]
+    assert not any("refused_basins.csv" in lbl for lbl in labels), labels
 
 
 # ---- map-export review Fix 3(b): the run_screening ATTACH site itself (not a seeded session_state) --

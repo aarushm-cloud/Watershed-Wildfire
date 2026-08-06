@@ -181,13 +181,20 @@ def run_screening(bbox_raw, dnbr_file, *, name="frontend", contour_m=150.0):
                 fire["out_dir"], fire["dem"],
                 validation_case=f"{fire['name']} (coordinate entry, dNBR both-arms)",
                 incised=(result.get("terrain_mode") == "incised"),
-                subbasin_meta=result.get("subbasin_meta"))
+                subbasin_meta=result.get("subbasin_meta"),
+                refused=result.get("refused_basins", []))
             try:
                 fc = json.loads(Path(gj_path).read_text())
             except json.JSONDecodeError as e:   # our own truncated geojson = internal fault -> backstop
                 raise RuntimeError(f"wrote an unreadable basins.geojson at {gj_path}: {e}") from e
             screen = {"kind": "ranked", "n": view["n_basins"], "fc": fc,
                       "csv": Path(csv_path).read_bytes(), "incised": view["incised"]}
+            rgj_path = Path(fire["out_dir"]) / "refused_basins.geojson"   # A41: only on a degraded run
+            if rgj_path.exists():
+                screen["refused_geojson"] = json.loads(rgj_path.read_text())
+            rcsv_path = Path(fire["out_dir"]) / "refused_basins.csv"
+            if rcsv_path.exists():   # F3: bytes read BEFORE the finally rmtree, never a dangling reference
+                screen["refused_csv"] = rcsv_path.read_bytes()
             map_png = Path(fire["out_dir"]) / DUAL_RANK_MAP_NAME   # A39: incised runs only
             if view["incised"] and map_png.exists():
                 screen["map_png"] = map_png.read_bytes()
@@ -268,46 +275,70 @@ def scorecard_view(package) -> dict:
     }
 
 
-def run_generated_screening(bbox_raw, pair, *, name="frontend", contour_m=150.0):
-    """Approved pair -> dNBR (creator) -> the SAME validated downstream as an upload -> the
-    screen dict. Failure contract identical to run_screening; extra success keys: quicklook +
-    dnbr_provenance."""
+def run_generated_screening(bbox_raw, sweep_inputs, *, name="frontend", contour_m=150.0):
+    """Approve-gated sweep (A41): one approval covers the vetted family (recommended pair,
+    vetted alt-posts, other sensor) -- never just the single displayed pair. Failure contract
+    mirrors run_screening: EVERY failure reduces to a legible dict, never a raise. Extra
+    success keys beyond the ranked shape: quicklook + dnbr_provenance (the WINNER's, re-read
+    off disk) + sweep_status/attempts/chosen (the trail) + refused_geojson (degraded only).
+
+    NO st.* calls in here -- preemption safety: the panel calls this inside a spinner behind
+    an idempotence guard, and a queued Streamlit rerun must never re-enter or duplicate this
+    pure function (see app.py's SafeSessionState note near the persistent `screen` store)."""
     out_dir = None
     try:
-        from autoacquire import dnbr_create
-        from acquire import build_fire_config
-        from src.pipeline import run_pipeline
-        from src.outputs import write_dnbr_outputs
+        # deferred import inside the try (matches every sibling orchestrator in this file): an
+        # import-time failure also reduces to a legible error, and it makes autoacquire.sweep.
+        # run_sweep the correct, ALWAYS-live monkeypatch seam for tests (a module-level import
+        # would bind a private copy into whichever module namespace is executing -- AppTest
+        # execs app.py into a fresh module object per run, so a top-level import here would be
+        # unpatchable from an AppTest-driven test).
+        from autoacquire.sweep import run_sweep
         bbox = validate_bbox(*bbox_raw)
-        out_dir = Path(tempfile.mkdtemp(prefix="wws_autoacq_"))
-        created = dnbr_create.create_dnbr(pair, bbox, out_dir / "dnbr", name=name)
-        fire = build_fire_config(bbox, created["dnbr_tif"], out_dir, name=name)
-        result = run_pipeline(fire, contour_m=contour_m)
-        view = result_to_view(result)
-        if view["kind"] == "ranked":
-            csv_path, gj_path = write_dnbr_outputs(
-                result["arms"]["arm_a"], result["arms"]["arm_b"], result["creek_nearest"],
-                fire["out_dir"], fire["dem"],
-                validation_case=f"{fire['name']} (auto-acquire, dNBR both-arms)",
-                incised=(result.get("terrain_mode") == "incised"),
-                subbasin_meta=result.get("subbasin_meta"))
-            try:
-                fc = json.loads(Path(gj_path).read_text())
-            except json.JSONDecodeError as e:
-                raise RuntimeError(f"wrote an unreadable basins.geojson at {gj_path}: {e}") from e
-            screen = {"kind": "ranked", "n": view["n_basins"], "fc": fc,
-                      "csv": Path(csv_path).read_bytes(), "incised": view["incised"],
-                      "quicklook": Path(created["quicklook_png"]).read_bytes(),
-                      "dnbr_provenance": json.loads(Path(created["provenance_json"]).read_text())}
-            map_png = Path(fire["out_dir"]) / DUAL_RANK_MAP_NAME   # A39: incised runs only
-            if view["incised"] and map_png.exists():
-                screen["map_png"] = map_png.read_bytes()
-            return screen
-        if view["kind"] == "refused":
-            return {"kind": "refused", "message": view["message"]}
-        return {"kind": "error", "message": view.get("message", "Unexpected pipeline result.")}
-    except (GateAbort, ValueError) as e:
-        return {"kind": "error", "message": str(e)}
+        out_dir = Path(tempfile.mkdtemp(prefix="wws_sweep_"))
+        sw = run_sweep(bbox, ignition=sweep_inputs["ignition"],
+                       containment=sweep_inputs["containment"], out_dir=out_dir,
+                       name=name, contour_m=contour_m,
+                       greenup_days=sweep_inputs.get("greenup_days"), approve=True)
+        if sw["status"] not in ("clean", "degraded"):
+            # selector state changed since the scorecard was shown, or every attempt failed to
+            # rank (aborted) -- an honest refusal, never a ranking built from stale intent.
+            return {"kind": "refused", "message": sw.get("message", sw["status"]),
+                    "attempts": sw.get("attempts", [])}
+        # read EVERYTHING before rmtree (bytes/parsed content, not paths -- the dir dies in finally)
+        fire_dir = Path(sw["result_paths"]["out_dir"])
+        try:
+            fc = json.loads((fire_dir / "basins.geojson").read_text())
+        except json.JSONDecodeError as e:   # our own truncated geojson = internal fault -> backstop
+            raise RuntimeError(f"wrote an unreadable basins.geojson at {fire_dir}: {e}") from e
+        # sweep_attempts.json's own "chosen" carries pre_date (sw["chosen"] -- the bare attempt
+        # record -- does not); prefer the richer on-disk copy, falling back to the return value.
+        chosen = sw["chosen"]
+        sweep_meta_path = fire_dir / "sweep_attempts.json"
+        if sweep_meta_path.exists():
+            chosen = json.loads(sweep_meta_path.read_text()).get("chosen", chosen)
+        screen = {"kind": "ranked", "n": len(fc.get("features", [])), "fc": fc,
+                  "csv": (fire_dir / "ranking.csv").read_bytes(),
+                  "incised": bool(fc.get("provenance", {}).get("incised_framing")),
+                  "sweep_status": sw["status"], "attempts": sw["attempts"], "chosen": chosen}
+        rgj_path = fire_dir / "refused_basins.geojson"   # only on a degraded run
+        if rgj_path.exists():
+            screen["refused_geojson"] = json.loads(rgj_path.read_text())
+        rcsv_path = fire_dir / "refused_basins.csv"
+        if rcsv_path.exists():   # F3: bytes read BEFORE the finally rmtree, never a dangling reference
+            screen["refused_csv"] = rcsv_path.read_bytes()
+        ql = sorted((fire_dir / "dnbr").glob("dnbr_*_quicklook.png"))
+        if ql:
+            screen["quicklook"] = ql[0].read_bytes()          # the WINNER's -- re-READ, never re-render
+        prov = sorted((fire_dir / "dnbr").glob("dnbr_*_provenance.json"))
+        if prov:
+            screen["dnbr_provenance"] = json.loads(prov[0].read_text())
+        map_png = fire_dir / DUAL_RANK_MAP_NAME   # A39: incised runs only
+        if map_png.exists():
+            screen["map_png"] = map_png.read_bytes()
+        return screen
+    except GateAbort as e:
+        return {"kind": "refused", "message": str(e)}
     except Exception as e:
         import traceback
         traceback.print_exc(file=sys.stderr)
@@ -335,9 +366,11 @@ def _top_k_markers(fc: dict, k: int) -> list:
 
 
 def build_basin_map(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA,
-                    top_k: int = 10, focus_basin_id=None) -> folium.Map:
+                    top_k: int = 10, focus_basin_id=None, refused_fc: dict = None) -> folium.Map:
     """Folium map of the ranked basins: fill by Arm A rank, dashed outline = rank-uncertain,
-    numbered markers on the top_k, focus_basin_id zooms to one basin."""
+    numbered markers on the top_k, focus_basin_id zooms to one basin. refused_fc (A41): an
+    optional refused_basins.geojson FeatureCollection, hatched in AFTER the ranked layer --
+    their hazard is UNKNOWN, never rendered as if it were low."""
     rows = {r["basin_id"]: r for r in basin_rows(fc, uncertain_delta=uncertain_delta)}
     n = max(len(rows), 1)
     m = folium.Map(location=_fc_center(fc), zoom_start=12, tiles="OpenStreetMap")
@@ -357,6 +390,14 @@ def build_basin_map(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA,
             aliases=["Basin", "Rank (Arm A)", "Score", "Rank (Arm B)", "Rank Δ"]),
     )
     gj.add_to(m)
+
+    if refused_fc and refused_fc.get("features"):
+        folium.GeoJson(
+            refused_fc,
+            style_function=lambda f: {"fillColor": "#888888", "color": "#555555",
+                                      "dashArray": "4", "fillOpacity": 0.35},
+            tooltip="REFUSED -- insufficient cloud-free data (hazard UNKNOWN, not low)",
+        ).add_to(m)
 
     for rank, latlon in _top_k_markers(fc, top_k):
         folium.Marker(
@@ -399,9 +440,31 @@ def _draw_map():
     return m
 
 
-def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, contour_m=150.0):
+def _render_attempts_expander(screen):
+    """A41 fix-wave IMPORTANT 3: the sweep's audit trail, shared by the ranked AND refused/aborted
+    branches -- an aborted sweep has `attempts` but no `chosen`, so `chosen` is optional here."""
+    import streamlit as st
+
+    attempts = screen.get("attempts")
+    if not attempts:
+        return
+    chosen = screen.get("chosen")
+    label = f"Sweep: {len(attempts)} attempt(s)"
+    if chosen:
+        label += f", chose {chosen['sensor']} {chosen['post_id']}"
+    with st.expander(label):
+        st.dataframe(attempts, use_container_width=True)
+
+
+def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, ignition, containment,
+                           greenup_days, contour_m=150.0):
     """The Generate-mode approval surface. Machine proposes, human disposes -- nothing is
-    built without the Approve click."""
+    built without the Approve click. ignition/containment/greenup_days are the CURRENT form
+    values (the SAME inputs the selector ran with) -- Approve triggers a bounded sweep over the
+    vetted family, not just the single displayed pair. greenup_days must thread through: the
+    sweep re-runs the selector internally, and a mismatch (operator-extended window silently
+    dropped to the 90d default) can re-select over a DIFFERENT post-window than the one the
+    human just approved."""
     import streamlit as st
     from autoacquire import scene_select
 
@@ -519,10 +582,25 @@ def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, contour
                          "where the news maps say the fire is?")
 
     if approve:
-        with st.spinner("Building the dNBR, fetching DEM + buildings, scoring both arms..."):
-            screen = run_generated_screening(bbox_raw, package["pair"], contour_m=contour_m)
-            screen["inputs"] = inputs_key
-            screen_box.clear(); screen_box.update(screen)   # same store pattern as upload
+        # Idempotence guard: a queued second Approve click (a Streamlit double-submit race)
+        # for the SAME inputs must never re-run the sweep -- it is expensive (up to
+        # (1+6)*2 = 14 attempts, both sensors) and the first run's result is still current.
+        if screen_box.get("inputs") == inputs_key and screen_box.get("kind") in (
+                "ranked", "refused", "error"):
+            st.info("Already ran for these inputs -- change inputs to re-run.")
+        else:
+            with st.spinner("Sweeping the vetted scene family (recommended pair, vetted "
+                            "alt-posts, other sensor): building the dNBR, fetching DEM + "
+                            "buildings, scoring both arms..."):
+                screen = run_generated_screening(
+                    bbox_raw, {"ignition": ignition, "containment": containment,
+                              "greenup_days": greenup_days},
+                    contour_m=contour_m)
+                screen["inputs"] = inputs_key
+                screen_box.clear(); screen_box.update(screen)   # same store pattern as upload
+            # The pre-approval preview may belong to a LOSING pair; the winner's own quicklook
+            # (screen["quicklook"], re-read off disk) renders instead -- never stack the two.
+            gen_box.pop("burnmap", None)
 
 
 def main():
@@ -615,7 +693,8 @@ def main():
     # The Generate panel renders below the form; an approval stores into `box` like an upload run.
     if mode_label == "Generate from dates" and gen_box:
         _render_generate_panel(gen_box, (west, south, east, north), inputs_key, box,
-                               contour_m=contour_m)
+                               ignition=ignition, containment=containment,
+                               greenup_days=int(greenup_days), contour_m=contour_m)
 
     screen = box
     if not screen:
@@ -630,9 +709,11 @@ def main():
         return
     if screen["kind"] == "refused":
         st.warning(f"**Screening refused.** {screen['message']}")
+        _render_attempts_expander(screen)   # A41: an aborted sweep's trail, not just "see attempts."
         return
 
     fc = screen["fc"]
+    provenance = fc.get("provenance", {})
     if screen.get("incised"):
         st.warning(
             "**Exploratory result — incised terrain.** This fire lacks the "
@@ -646,8 +727,14 @@ def main():
             "score's area term is a segmentation artifact here -- and intensity scored higher on the "
             "one validation case, so treat both as exploratory."
         )
+    if provenance.get("refused_count"):   # A41: path-agnostic -- upload and generate both land here
+        st.warning(f"{provenance['refused_count']} of {provenance['n_basins_total']} basins "
+                   "could not be assessed (insufficient cloud-free imagery). Their hazard is "
+                   "UNKNOWN -- not low. Any refused basin could rank high if data existed; "
+                   "see refused_basins.csv.")
     st.success(f"Ranked {screen['n']} basins — Arm A (binned) is the headline; "
                f"Arm B (continuous) rides alongside.")
+    _render_attempts_expander(screen)   # A41: the sweep's audit trail
     # Basin lookup: numbered top-K markers + zoom-to-rank for large fires.
     n_basins = screen["n"]
     focus_id = None
@@ -658,10 +745,12 @@ def main():
                                     help="0 = show the whole fire; 1..N zooms the map to that Arm A rank.")
         if jump_rank >= 1:
             focus_id = rank_to_id.get(int(jump_rank))
-    st_folium(build_basin_map(fc, focus_basin_id=focus_id), height=520, use_container_width=True,
-              key="result_map")
+    st_folium(build_basin_map(fc, focus_basin_id=focus_id, refused_fc=screen.get("refused_geojson")),
+              height=520, use_container_width=True, key="result_map")
     st.caption("Fill = Arm A screening rank (hot = higher priority). **Blue dashed outline = Arm A "
-               "and Arm B disagree on rank** — treat that basin as rank-uncertain.")
+               "and Arm B disagree on rank** — treat that basin as rank-uncertain."
+               + (" **Gray hatching = refused** — insufficient cloud-free data; hazard UNKNOWN, "
+                  "not low." if screen.get("refused_geojson") else ""))
 
     with st.expander("How to read this"):
         st.markdown(
@@ -701,6 +790,9 @@ def main():
                "frozen formula, ranked within this fire only. Not a probability or a prediction.")
     st.download_button("Download ranking.csv", screen["csv"],
                        file_name="ranking.csv", mime="text/csv")
+    if screen.get("refused_csv"):   # F3: the degraded banner names this file -- it must exist to download
+        st.download_button("Download refused_basins.csv", screen["refused_csv"],
+                           file_name="refused_basins.csv", mime="text/csv")
     if screen.get("map_png"):   # A39: the static dual-rank map travels on incised runs only
         st.download_button("Download dual-rank map (PNG)", screen["map_png"],
                            file_name=DUAL_RANK_MAP_NAME, mime="image/png")
@@ -709,9 +801,14 @@ def main():
     # the quicklook + the creator's audit record (scenes, dates, scaling, masks).
     if screen.get("quicklook"):
         with st.expander("The dNBR this screening used (auto-acquired)"):
-            st.image(screen["quicklook"], width=420,
-                     caption="Raw-dNBR quicklook (provisional, within-fire, UNVALIDATED "
-                             "for ranking — A34).")
+            caption = ("Raw-dNBR quicklook (provisional, within-fire, UNVALIDATED "
+                       "for ranking — A34).")
+            chosen = screen.get("chosen")   # A41: the sweep's winner, re-read off disk
+            if chosen:
+                pre_when = f" ({chosen['pre_date']})" if chosen.get("pre_date") else ""
+                caption += (f" Winning pair: {chosen['sensor']} pre {chosen['pre_id']}"
+                           f"{pre_when} -> post {chosen['post_id']} ({chosen['post_date']}).")
+            st.image(screen["quicklook"], width=420, caption=caption)
             st.json(screen.get("dnbr_provenance", {}))
 
 

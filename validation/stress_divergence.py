@@ -90,6 +90,9 @@ def compare_rankings(a, b, *, k=10):
             "inconsistent (different DEM or corrupt join)."
         )
 
+    # A41 note: refused basins are absent from ranking rows, so only_a/only_b now conflate
+    # "not detected" with "refused for cloud" -- read sweep_attempts.json/refused sidecars
+    # before interpreting.
     out = {
         "n_a": int(len(a)), "n_b": int(len(b)), "n_matched": int(len(j)),
         "only_a": int(len(a) - len(j)), "only_b": int(len(b) - len(j)),

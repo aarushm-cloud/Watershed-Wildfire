@@ -485,10 +485,19 @@ def _pair_zone_ok(pre, post):
 # ---------------------------------------------------------------------------
 
 
-def select(bbox, *, ignition, containment, today=None, greenup_days=GREENUP_DEFAULT_DAYS):
+def select(bbox, *, ignition, containment, today=None, greenup_days=GREENUP_DEFAULT_DAYS,
+           sensors=("S2", "Landsat")):
     """The deterministic selector: bbox + dates -> recommendation package or an honest failure
     state. S2 first, Landsat pair-level fallback, never mixed; pre = most-recent clean,
-    post = first clean. `today` injectable for tests."""
+    post = first clean. `today` injectable for tests. `sensors` restricts the arms tried,
+    in order (default: unchanged S2-first behavior)."""
+    # A41: validate before any network-ish work -- a typo'd sensor name must fail loud here,
+    # never fall through to _search_scenes' `== "S2"` else-Landsat branch and silently query
+    # the wrong STAC.
+    if not sensors or not set(sensors) <= {"S2", "Landsat"}:
+        raise GateAbort(
+            f"sensors={sensors!r} must be a non-empty subset of ('S2', 'Landsat')."
+        )
     today = today if today is not None else date.today()
     windows = derive_windows(
         ignition=ignition, containment=containment, today=today, greenup_days=greenup_days
@@ -501,7 +510,7 @@ def select(bbox, *, ignition, containment, today=None, greenup_days=GREENUP_DEFA
     any_clean_pre = False
 
     chosen = None
-    for sensor in ("S2", "Landsat"):
+    for sensor in sensors:
         pre_pool = _search_scenes(sensor, bbox, windows["pre_start"], windows["pre_end"])
         post_pool = _search_scenes(sensor, bbox, windows["post_start"], post_search_end)
         passes_tried += len(post_pool)
@@ -583,7 +592,7 @@ def select(bbox, *, ignition, containment, today=None, greenup_days=GREENUP_DEFA
         ]
         chosen["alt_pre"], chosen["alt_post"] = alt_pre, alt_post
         chosen["masks"] = masks
-        break  # S2 pair found -> no Landsat fallback needed (pair-level fallback)
+        break  # pair found for this sensor -> stop; remaining sensors in `sensors` are not tried (pair-level fallback)
 
     if chosen is None:
         return _failure_state(

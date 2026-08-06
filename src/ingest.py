@@ -148,11 +148,12 @@ def ingest_dnbr_both_arms(native_path, dem_profile):
     # One shared valid footprint; no NaN/sentinel may survive into it for either arm (A8).
     valid = (dnbr_a != DNBR_NODATA) & np.isfinite(dnbr_a)
     if not np.isfinite(dnbr_a[valid]).all() or bool((dnbr_a[valid] == DNBR_NODATA).any()):
-        raise GateAbort("dNBR Arm A: non-finite/sentinel value inside the valid footprint (P2.2b §1).")
+        raise GateAbort("dNBR Arm A: non-finite/sentinel value inside the valid footprint (P2.2b §1).",
+                        scope="attempt")   # A41: pair-dependent -- the next vetted pair may be clean
     if not np.isfinite(dnbr_b[valid]).all() or bool((dnbr_b[valid] == DNBR_NODATA).any()):
         raise GateAbort("dNBR Arm B (bilinear) left a hole inside the shared valid footprint -- the A/B "
                         "footprints would differ; failing loud rather than measuring a resample artifact "
-                        "as normalization disagreement (P2.2b §1).")
+                        "as normalization disagreement (P2.2b §1).", scope="attempt")   # A41: pair-dependent
 
     wt_a, cov_a, cls_a = normalize_dnbr_arm_a(dnbr_a, valid)   # nearest-reprojected raster
     wt_b, cov_b = normalize_dnbr_arm_b(dnbr_b, valid)          # bilinear-reprojected raster
