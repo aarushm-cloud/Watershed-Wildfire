@@ -187,12 +187,12 @@ def _degraded_sweep_result(tmp_path, leak_result=False):
     ret = {
         "status": "degraded",
         "package": {"status": "recommended"},
-        "attempts": [{"sensor": "S2", "pre_id": "P", "post_id": "Q1", "post_date": "2026-07-01",
-                     "outcome": "ranked", "refused_count": 1, "n_basins_total": 5,
-                     "total_nodata_frac": 0.12}],
-        "chosen": {"sensor": "S2", "pre_id": "P", "post_id": "Q1", "post_date": "2026-07-01",
-                  "outcome": "ranked", "refused_count": 1, "n_basins_total": 5,
-                  "total_nodata_frac": 0.12},
+        "attempts": [{"sensor": "S2", "pre_id": "P", "pre_date": "2026-06-04", "post_id": "Q1",
+                     "post_date": "2026-07-01", "outcome": "ranked", "refused_count": 1,
+                     "n_basins_total": 5, "total_nodata_frac": 0.12}],
+        "chosen": {"sensor": "S2", "pre_id": "P", "pre_date": "2026-06-04", "post_id": "Q1",
+                  "post_date": "2026-07-01", "outcome": "ranked", "refused_count": 1,
+                  "n_basins_total": 5, "total_nodata_frac": 0.12},
         "refused": [{"phase1_basin_id": 7, "nodata_frac": 0.4}],
         "result_paths": {"out_dir": str(tmp_path),
                          "ranking_csv": str(tmp_path / "ranking.csv"),
@@ -251,6 +251,27 @@ def test_custom_max_swaps_and_contour_m_pass_through(monkeypatch, tmp_path):
     assert kwargs["contour_m"] == 75.5
 
 
+def test_relative_out_reaches_the_sweep_absolute(monkeypatch, tmp_path):
+    """A relative --out reaches WBT's breach step on incised fires and dies with a misleading
+    'returned 0 but did not write' GateAbort -- absolutized once at the CLI boundary."""
+    monkeypatch.chdir(tmp_path)
+    sweep_spy = _Spy(ret={"status": "waiting"})
+    monkeypatch.setattr(ar.sweep, "run_sweep", sweep_spy)
+    ar.main(ARGV_COMMON + ["--out", "rel_out"])
+    _, kwargs = sweep_spy.calls[0]
+    assert kwargs["out_dir"].is_absolute()
+    assert kwargs["out_dir"] == Path(tmp_path).resolve() / "rel_out"
+
+
+def test_relative_out_reaches_the_legacy_path_absolute(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    legacy_spy = _Spy(ret=_package("waiting"))
+    monkeypatch.setattr(ar, "run_autoacquire", legacy_spy)
+    ar.main(ARGV_COMMON + ["--out", "rel_out", "--max-swaps", "0"])
+    _, kwargs = legacy_spy.calls[0]
+    assert kwargs["out_dir"].is_absolute()
+
+
 def test_approve_flag_passes_through_to_sweep(monkeypatch, tmp_path):
     sweep_spy = _Spy(ret={"status": "waiting"})
     monkeypatch.setattr(ar.sweep, "run_sweep", sweep_spy)
@@ -272,9 +293,19 @@ def test_degraded_sweep_prints_chosen_and_refused_count(monkeypatch, tmp_path, c
                         _Spy(ret=_degraded_sweep_result(tmp_path)))
     ar.main(ARGV_COMMON + ["--out", str(tmp_path), "--approve"])
     out = capsys.readouterr().out
+    assert "pre : P (2026-06-04)" in out        # dated, from the chosen record itself
     assert "Q1" in out
     assert "1 basin(s) refused" in out
     assert "refused_basins.csv" in out          # hazard-unknown pointer (degraded only)
+
+
+def test_degraded_sweep_prints_refused_phase1_ids(monkeypatch, tmp_path, capsys):
+    """Degraded runs name the refused basins on stdout, not just a count + sidecar pointer."""
+    monkeypatch.setattr(ar.sweep, "run_sweep",
+                        _Spy(ret=_degraded_sweep_result(tmp_path)))
+    ar.main(ARGV_COMMON + ["--out", str(tmp_path), "--approve"])
+    out = capsys.readouterr().out
+    assert "refused (phase-1 basin ids): 7" in out
 
 
 def test_clean_sweep_prints_chosen_without_hazard_pointer(monkeypatch, tmp_path, capsys):

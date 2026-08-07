@@ -82,13 +82,16 @@ def main(argv=None):
     from datetime import date
 
     args = _parse_args(argv)
+    # Absolutized ONCE at the CLI boundary: a relative --out reaches WBT's breach step on
+    # incised fires and dies with a misleading "returned 0 but did not write" GateAbort.
+    out_root = Path(args.out).resolve()
 
     if args.max_swaps == 0:
         out = run_autoacquire(
             tuple(args.bbox),
             ignition=date.fromisoformat(args.ignition),
             containment=date.fromisoformat(args.containment),
-            out_dir=Path(args.out), name=args.name,
+            out_dir=out_root, name=args.name,
             greenup_days=args.greenup_days, approve=args.approve,
         )
     else:
@@ -96,7 +99,7 @@ def main(argv=None):
             tuple(args.bbox),
             ignition=date.fromisoformat(args.ignition),
             containment=date.fromisoformat(args.containment),
-            out_dir=Path(args.out), name=args.name,
+            out_dir=out_root, name=args.name,
             greenup_days=args.greenup_days, max_post_swaps=args.max_swaps,
             contour_m=args.contour_m, approve=args.approve,
         )
@@ -114,7 +117,7 @@ def main(argv=None):
         print(f"{len(out['pipeline'].get('refused_basins', []) or [])} basin(s) refused")
     elif out["status"] in ("clean", "degraded"):
         chosen = out["chosen"]
-        print(f"pre : {chosen['pre_id']}")
+        print(f"pre : {chosen['pre_id']} ({chosen['pre_date']})")
         print(f"post: {chosen['post_id']} ({chosen['post_date']})")
         refused = out.get("refused", [])
         print(f"{len(refused)} basin(s) refused")
@@ -123,6 +126,8 @@ def main(argv=None):
                   "assessed (insufficient cloud-free imagery). Their hazard is UNKNOWN "
                   "-- not low. Any refused basin could rank high if data existed; see "
                   "refused_basins.csv.")
+            print("refused (phase-1 basin ids): "
+                  + ", ".join(str(b["phase1_basin_id"]) for b in refused))
     elif out["status"] == "aborted":
         print(out.get("message", ""))
         print(f"attempts: {len(out.get('attempts', []))}")
@@ -133,9 +138,9 @@ def main(argv=None):
         from datetime import date as _d
         return o.isoformat() if isinstance(o, _d) else str(o)
 
-    (Path(args.out) / "autoacquire_result.json").parent.mkdir(parents=True, exist_ok=True)
+    out_root.mkdir(parents=True, exist_ok=True)
     slim = {k: v for k, v in out.items() if k not in ("pipeline", "masks", "result")}
-    Path(args.out, "autoacquire_result.json").write_text(
+    (out_root / "autoacquire_result.json").write_text(
         json.dumps(slim, default=_js, indent=2)
     )
     return out

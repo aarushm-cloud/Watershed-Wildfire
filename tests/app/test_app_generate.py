@@ -148,14 +148,10 @@ def _fake_run_sweep(status="clean", *, refused_ids=(), chosen=None, attempts=Non
     files run_generated_screening reads back off disk (ranking.csv, basins.geojson, ...) into
     whatever out_dir it is called with -- mirrors the actual sweep.py/write_dnbr_outputs
     contract instead of over-mocking internals. `.calls` records every invocation's kwargs."""
-    chosen = chosen or {"sensor": "S2", "pre_id": "PRE", "post_id": "POST",
-                        "post_date": "2026-07-07", "outcome": "ranked",
+    chosen = chosen or {"sensor": "S2", "pre_id": "PRE", "pre_date": "2026-06-04",
+                        "post_id": "POST", "post_date": "2026-07-07", "outcome": "ranked",
                         "refused_count": len(refused_ids),
                         "n_basins_total": 1 + len(refused_ids), "total_nodata_frac": 0.0}
-    # sweep.py's real return value's "chosen" lacks pre_date (only the on-disk sweep_attempts.json
-    # copy carries it -- see run_generated_screening); mirror BOTH shapes so tests catch a
-    # regression in either read path.
-    chosen_on_disk = {**chosen, "pre_date": "2026-06-04"}
     attempts = attempts if attempts is not None else [chosen]
     calls = []
 
@@ -182,7 +178,7 @@ def _fake_run_sweep(status="clean", *, refused_ids=(), chosen=None, attempts=Non
               "provenance": provenance}
         (out_dir / "basins.geojson").write_text(json.dumps(fc))
         (out_dir / "sweep_attempts.json").write_text(
-            json.dumps({"attempts": attempts, "chosen": chosen_on_disk}))
+            json.dumps({"attempts": attempts, "chosen": chosen}))
         if refused_ids:
             rgj = {"type": "FeatureCollection",
                   "features": [{"type": "Feature", "properties": {"phase1_basin_id": r},
@@ -209,8 +205,7 @@ def test_run_generated_screening_clean_sweep_is_ranked(monkeypatch):
     assert out["kind"] == "ranked" and out["n"] == 1
     assert out["sweep_status"] == "clean"
     assert out["chosen"]["sensor"] == "S2" and out["chosen"]["post_id"] == "POST"
-    assert out["chosen"]["pre_date"] == "2026-06-04"      # read from sweep_attempts.json, not
-                                                            # the return value's bare attempt record
+    assert out["chosen"]["pre_date"] == "2026-06-04"      # carried by the chosen record itself
     assert out["quicklook"].startswith(b"\x89PNG")
     assert out["dnbr_provenance"] == {"sensor": "S2"}
     assert "refused_geojson" not in out                  # clean run: no sidecar to surface
@@ -285,6 +280,31 @@ def test_run_generated_screening_gateabort_from_sweep_is_refused_not_error(monke
     monkeypatch.setattr(sweep, "run_sweep", _boom)
     out = app.run_generated_screening(BBOX, SWEEP_INPUTS)
     assert out["kind"] == "refused" and "manifest" in out["message"]
+
+
+def test_run_generated_screening_bad_bbox_is_error_not_refused(monkeypatch):
+    """A malformed bbox is an input error, not a science refusal -- rendering it as
+    'Screening refused' dilutes the Tier-1 vocabulary. Validated before the sweep starts."""
+    fake = _fake_run_sweep("clean")
+    monkeypatch.setattr(sweep, "run_sweep", fake)
+    out = app.run_generated_screening((10, 20, 5, 30), SWEEP_INPUTS)
+    assert out["kind"] == "error" and "West" in out["message"]
+    assert fake.calls == []                             # nothing staged, nothing swept
+
+
+def test_chosen_is_the_return_value_never_a_disk_reread(monkeypatch):
+    """run_sweep's chosen record carries pre_date itself now; the old workaround (re-reading
+    sweep_attempts.json for the richer copy) is gone -- the return value is the single source."""
+    fake = _fake_run_sweep("clean")
+
+    def _tampered(bbox, **kw):
+        out = fake(bbox, **kw)
+        (Path(kw["out_dir"]) / "sweep_attempts.json").write_text(
+            json.dumps({"attempts": [], "chosen": {"pre_date": "9999-01-01"}}))
+        return out
+    monkeypatch.setattr(sweep, "run_sweep", _tampered)
+    out = app.run_generated_screening(BBOX, SWEEP_INPUTS)
+    assert out["chosen"]["pre_date"] == "2026-06-04"    # the return's, not the tampered file's
 
 
 def test_contour_m_threads_through_to_run_sweep(monkeypatch):
@@ -392,6 +412,34 @@ def test_second_queued_approve_click_does_not_rerun_the_sweep(monkeypatch):
     assert not at.exception, at.exception
     assert len(fake.calls) == 1                            # still just once
     assert any("already ran" in str(i.value).lower() for i in at.info)
+
+
+def test_error_result_offers_retry_that_reruns_the_sweep(monkeypatch):
+    """A transient failure (kind='error') must not dead-end behind the idempotence guard:
+    the error branch renders a Retry button that discards the failed result and re-runs the
+    screening with the same inputs -- no input perturbation required."""
+    real = _fake_run_sweep("clean")
+    state = {"n": 0}
+
+    def _flaky(bbox, **kw):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise RuntimeError("transient network hiccup")
+        return real(bbox, **kw)
+
+    at = _seeded_generate_apptest(monkeypatch, _flaky)
+    approve = next(b for b in at.button if "Approve" in b.label)
+    approve.set_value(True)
+    at.run()
+    assert not at.exception, at.exception
+    assert at.session_state["screen"]["kind"] == "error"
+
+    retry = next(b for b in at.button if b.label == "Retry")
+    retry.set_value(True)
+    at.run()
+    assert not at.exception, at.exception
+    assert state["n"] == 2                              # the sweep actually re-ran
+    assert at.session_state["screen"]["kind"] == "ranked"
 
 
 def test_burnmap_preview_popped_after_a_completed_sweep(monkeypatch):

@@ -307,6 +307,30 @@ def test_zero_clean_everywhere_aborts(tmp_path):
     assert "chosen" not in res
 
 
+def test_aborted_sweep_marks_fire_level_dir(tmp_path):
+    """An aborted sweep must not leave the fire-level dir looking like a prior run's success:
+    sweep_attempts.json is written with status 'aborted' so the on-disk state is honest."""
+    aborts = [GateAbort("every basin exceeds the NoData bar", scope="attempt") for _ in range(6)]
+    h, out, res = _sweep(tmp_path, aborts)
+    trail = json.loads((out / "sweep_attempts.json").read_text())
+    assert trail["status"] == "aborted"
+    assert len(trail["attempts"]) == 6
+    assert "no attempt produced a ranking" in trail["message"]
+    assert "chosen" not in trail
+    _assert_scalars(trail)
+
+
+def test_bad_sensor_name_fails_loud_at_entry(tmp_path):
+    """A typo'd sensor (custom callers only) must abort BEFORE any selector work -- otherwise
+    it is swallowed mid-sweep as a sensor-scoped selector failure and the sweep silently runs
+    one-sensor (mirrors select()'s own validation)."""
+    h = Harness(tmp_path, [_result(0)])
+    with pytest.raises(GateAbort, match="non-empty subset"):
+        run_sweep(BBOX, ignition=IGNITION, containment=CONTAINMENT, out_dir=tmp_path / "fire",
+                  approve=True, sensors=("S2", "Lansat"), **h.seams())
+    assert h.calls == []                               # validated before anything ran
+
+
 # ---- the approval gate --------------------------------------------------------------------
 
 def test_gate_closed_without_approve(tmp_path):
@@ -366,6 +390,15 @@ def test_winner_promoted_and_attempts_json(tmp_path):
     assert "ranking content never consulted" in trail["selection"]
     _assert_scalars(res["attempts"])
     _assert_scalars(res["refused"])
+
+
+def test_chosen_and_attempt_records_carry_pre_date(tmp_path):
+    """The in-memory chosen record carries pre_date itself -- consumers must never need to
+    re-read sweep_attempts.json for it (the pre-fix workaround in app.py and the CLI)."""
+    h, out, res = _sweep(tmp_path, [_result(2), _result(0)])
+    assert res["chosen"]["pre_date"] == "2026-07-10"
+    for a in res["attempts"]:
+        assert a["pre_date"] == "2026-07-10"
 
 
 def test_each_attempt_completes_its_own_manifest_copy(tmp_path):

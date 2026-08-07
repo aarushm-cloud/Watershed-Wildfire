@@ -60,7 +60,9 @@ def segment_subbasins(dem_tif, work_dir, *,
             raise GateAbort(
                 f"FAIL: WhiteboxTools {fn.__name__} returned 0 but did not write its expected "
                 f"output {out!r} -- sub-basin delineation aborted (A39). Do NOT proceed on a "
-                f"partial hydrology product.")
+                f"partial hydrology product. Check that the out/work dir is an ABSOLUTE path "
+                f"-- WBT resolves a relative working dir against its own location, not the "
+                f"process cwd.")
 
     _run(wbt.breach_depressions_least_cost, "dem.tif", "dem_breached.tif",
          dist=SUBBASIN_BREACH_DIST_CELLS, fill=True, out="dem_breached.tif")

@@ -285,6 +285,12 @@ def run_generated_screening(bbox_raw, sweep_inputs, *, name="frontend", contour_
     NO st.* calls in here -- preemption safety: the panel calls this inside a spinner behind
     an idempotence guard, and a queued Streamlit rerun must never re-enter or duplicate this
     pure function (see app.py's SafeSessionState note near the persistent `screen` store)."""
+    try:
+        bbox = validate_bbox(*bbox_raw)
+    except GateAbort as e:
+        # An input error, never a science "refusal" -- the refused vocabulary is Tier-1
+        # language for the science declining, and a typo'd box must not dilute it.
+        return {"kind": "error", "message": str(e)}
     out_dir = None
     try:
         # deferred import inside the try (matches every sibling orchestrator in this file): an
@@ -294,7 +300,6 @@ def run_generated_screening(bbox_raw, sweep_inputs, *, name="frontend", contour_
         # execs app.py into a fresh module object per run, so a top-level import here would be
         # unpatchable from an AppTest-driven test).
         from autoacquire.sweep import run_sweep
-        bbox = validate_bbox(*bbox_raw)
         out_dir = Path(tempfile.mkdtemp(prefix="wws_sweep_"))
         sw = run_sweep(bbox, ignition=sweep_inputs["ignition"],
                        containment=sweep_inputs["containment"], out_dir=out_dir,
@@ -311,16 +316,11 @@ def run_generated_screening(bbox_raw, sweep_inputs, *, name="frontend", contour_
             fc = json.loads((fire_dir / "basins.geojson").read_text())
         except json.JSONDecodeError as e:   # our own truncated geojson = internal fault -> backstop
             raise RuntimeError(f"wrote an unreadable basins.geojson at {fire_dir}: {e}") from e
-        # sweep_attempts.json's own "chosen" carries pre_date (sw["chosen"] -- the bare attempt
-        # record -- does not); prefer the richer on-disk copy, falling back to the return value.
-        chosen = sw["chosen"]
-        sweep_meta_path = fire_dir / "sweep_attempts.json"
-        if sweep_meta_path.exists():
-            chosen = json.loads(sweep_meta_path.read_text()).get("chosen", chosen)
         screen = {"kind": "ranked", "n": len(fc.get("features", [])), "fc": fc,
                   "csv": (fire_dir / "ranking.csv").read_bytes(),
                   "incised": bool(fc.get("provenance", {}).get("incised_framing")),
-                  "sweep_status": sw["status"], "attempts": sw["attempts"], "chosen": chosen}
+                  "sweep_status": sw["status"], "attempts": sw["attempts"],
+                  "chosen": sw["chosen"]}
         rgj_path = fire_dir / "refused_basins.geojson"   # only on a degraded run
         if rgj_path.exists():
             screen["refused_geojson"] = json.loads(rgj_path.read_text())
@@ -457,7 +457,7 @@ def _render_attempts_expander(screen):
 
 
 def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, ignition, containment,
-                           greenup_days, contour_m=150.0):
+                           greenup_days, contour_m=150.0, retry=False):
     """The Generate-mode approval surface. Machine proposes, human disposes -- nothing is
     built without the Approve click. ignition/containment/greenup_days are the CURRENT form
     values (the SAME inputs the selector ran with) -- Approve triggers a bounded sweep over the
@@ -529,7 +529,9 @@ def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, ignitio
                          caption="Your box, true color — judge YOUR fire area, not the tile.")
 
     a1, a2 = st.columns(2)
-    approve = a1.button("Approve & build dNBR → screen", type="primary")
+    # `retry` re-enters the already-approved sweep after a transient error (the error branch's
+    # Retry button) -- the same vetted family, not a new approval decision.
+    approve = a1.button("Approve & build dNBR → screen", type="primary") or retry
     show_map = a2.button("Show me the burn map first")
 
     alts = package["alternatives"]
@@ -684,7 +686,11 @@ def main():
         st.session_state["screen"] = {}
     box = st.session_state["screen"]
 
-    if run:
+    # Set by the error branch's Retry button on the PREVIOUS run: re-run the same inputs
+    # through whichever mode is active (popped unconditionally so it can never go stale).
+    retry = st.session_state.pop("_retry", False)
+
+    if run or (retry and mode_label == "Upload a dNBR"):
         with st.spinner("Fetching DEM + buildings and scoring both dNBR arms..."):
             screen = run_screening((west, south, east, north), dnbr_file, contour_m=contour_m)
             screen["inputs"] = inputs_key
@@ -694,7 +700,8 @@ def main():
     if mode_label == "Generate from dates" and gen_box:
         _render_generate_panel(gen_box, (west, south, east, north), inputs_key, box,
                                ignition=ignition, containment=containment,
-                               greenup_days=int(greenup_days), contour_m=contour_m)
+                               greenup_days=int(greenup_days), contour_m=contour_m,
+                               retry=retry)
 
     screen = box
     if not screen:
@@ -706,6 +713,12 @@ def main():
                    "longer match what is shown below. Click **Run screening** to re-screen.")
     if screen["kind"] == "error":
         st.error(f"Could not screen this area: {screen['message']}")
+        # The idempotence guard treats a stored error as complete for these inputs, so a
+        # transient failure would otherwise require perturbing an input to re-run.
+        if st.button("Retry"):
+            box.clear()
+            st.session_state["_retry"] = True
+            st.rerun()
         return
     if screen["kind"] == "refused":
         st.warning(f"**Screening refused.** {screen['message']}")

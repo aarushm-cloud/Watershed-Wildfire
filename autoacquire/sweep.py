@@ -12,8 +12,9 @@ MAX_POST_SWAPS = 6   # A41 owned value
 
 
 def _attempt_record(sensor, pre, post, outcome, refused=None, total=None, total_nodata=None):
-    d = post.get("date")
-    return {"sensor": sensor, "pre_id": pre.get("id"), "post_id": post.get("id"),
+    d, pd = post.get("date"), pre.get("date")
+    return {"sensor": sensor, "pre_id": pre.get("id"),
+            "pre_date": None if pd is None else str(pd), "post_id": post.get("id"),
             "post_date": None if d is None else str(d), "outcome": outcome,
             "refused_count": None if refused is None else len(refused),
             "n_basins_total": total, "total_nodata_frac": total_nodata}
@@ -40,6 +41,13 @@ def run_sweep(bbox, *, ignition, containment, out_dir, name="fire", greenup_days
     attach_fn = attach_fn or acquire.attach_dnbr
     pipeline_fn = pipeline_fn or _pipeline.run_pipeline
     write_fn = write_fn or outputs.write_dnbr_outputs
+
+    # Mirrors select()'s own check: a typo'd second sensor would otherwise surface only
+    # mid-sweep as a sensor-scoped selector failure -> a silent one-sensor sweep.
+    if not sensors or not set(sensors) <= {"S2", "Landsat"}:
+        raise GateAbort(
+            f"sensors={sensors!r} must be a non-empty subset of ('S2', 'Landsat')."
+        )
 
     kw = {} if greenup_days is None else {"greenup_days": greenup_days}
     first = select_fn(bbox, ignition=ignition, containment=containment,
@@ -98,7 +106,6 @@ def run_sweep(bbox, *, ignition, containment, out_dir, name="fire", greenup_days
                                   "post_date": str(pair["post"].get("date"))})
         # Retain paths + refusal METADATA only -- never the result object or its masks (spec 4).
         return {"dir": adir, "paths": [str(p) for p in paths],
-                "pre_date": str(pair["pre"].get("date")),
                 "refused": [{"phase1_basin_id": b["basin_id"], "nodata_frac": b["nodata_frac"]}
                             for b in refused],
                 "record": _attempt_record(sensor, pair["pre"], pair["post"], "ranked",
@@ -140,17 +147,20 @@ def run_sweep(bbox, *, ignition, containment, out_dir, name="fire", greenup_days
     if winner is None:
         ranked = [c for c in candidates if c["record"]["refused_count"] is not None]
         if not ranked:
+            # Mark the fire-level dir honestly: without this, a prior run's artifacts
+            # sit there looking like THIS run's output.
+            msg = "no attempt produced a ranking; see attempts."
+            (out_dir / "sweep_attempts.json").write_text(json.dumps(
+                {"status": "aborted", "attempts": attempts, "message": msg}, indent=2))
             return {"status": "aborted", "package": first, "attempts": attempts,
-                    "message": "no attempt produced a ranking; see attempts."}
+                    "message": msg}
         winner = min(ranked, key=_selection_key)       # frozen score-blind key
 
     _promote(winner["dir"], out_dir)
     (out_dir / "sweep_attempts.json").write_text(json.dumps({
         "attempts": attempts,
-        "chosen": {"sensor": winner["record"]["sensor"],
-                   "pre_id": winner["record"]["pre_id"], "pre_date": winner["pre_date"],
-                   "post_id": winner["record"]["post_id"],
-                   "post_date": winner["record"]["post_date"]},
+        "chosen": {k: winner["record"][k]
+                   for k in ("sensor", "pre_id", "pre_date", "post_id", "post_date")},
         "selection": "chosen by coverage only (fewest refused -> lowest total nodata -> "
                      "earliest post); ranking content never consulted (A41)."}, indent=2))
     status = "clean" if winner["record"]["refused_count"] == 0 else "degraded"
