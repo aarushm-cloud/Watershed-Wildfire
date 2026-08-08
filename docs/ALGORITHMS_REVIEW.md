@@ -144,6 +144,11 @@ Answers Section 5 "two rankings, one excluding the building factor, if not confi
 - **Priority:** **bumped to high (owner, 2026-07-11)** — "publish all basin data" wants these flags on
   every run; surface `low_coverage` + F4 `slope_coverage_frac`/`low_slope_coverage` on the SBS
   `write_outputs`. Safe: additive columns, no score/rank change; update the CSV-schema test.
+- **Applied 2026-08-08:** back-ported — `write_outputs` (SBS) now emits `slope_coverage_frac`/
+  `low_slope_coverage` (F4) + `low_coverage` (A18) in ranking.csv AND basins.geojson, mirroring the
+  dNBR writer's placement; schema locked by `tests/core/test_outputs_columns.py`; suite 468/1-skip,
+  behavior lock intact. Additive only — score/rank/ordering untouched. Note: byte-compares of SBS
+  output against pre-2026-08-08 artifacts will differ by exactly these three columns.
 
 ### T4 — ALGORITHMS.md reconciliation pass (apply S1–S4 + review outcomes)
 - Bring `docs/ALGORITHMS.md` up to the live tree: §7 dNBR **wired** (S1), Landsat-30m sensor caveat (S4),
@@ -152,6 +157,7 @@ Answers Section 5 "two rankings, one excluding the building factor, if not confi
 - **Owner (2026-07-11): low priority but do early.** Do as **one coherent pass after the review completes**
   (captures §8–11 + header/date together), not piecemeal mid-review.
 - **Priority:** low-but-early. Pure documentation; no code/science change.
+- **Applied (running):** 2026-07-11 header pass (S1–S3); A39 Task-12 §9 rewrite (2026-07-20); 2026-07-28 §7/§11 (A41 gating); 2026-08-08 A40 ordering (§1/§9 + anchors). Still open: the T5 convention-threshold bullet.
 
 ### T5 — Config hygiene: re-baseline `MASTER_KNOWN_KM2` + document convention-threshold rationale
 - **SUPERSEDED (re-baseline half) by A38, 2026-07-13.** Instead of re-baselining the km² bands to 44.7273,

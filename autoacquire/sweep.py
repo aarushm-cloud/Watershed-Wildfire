@@ -89,7 +89,7 @@ def run_sweep(bbox, *, ignition, containment, out_dir, name="fire", greenup_days
         refused = result.get("refused_basins", [])
         clean = result["arms"]["arm_a"]["basins"]      # verified shape (pipeline.py:465-484)
         total = len(refused) + len(clean)
-        # Direct read: Task 2 attaches nodata_frac to EVERY record, and a silent 0.0 default
+        # Direct read: the A41 nodata guard attaches nodata_frac to EVERY record, and a silent 0.0 default
         # would read a broken invariant as perfect coverage and mis-pick the winner (A8).
         total_nodata = sum(b["nodata_frac"] for b in refused) + \
             sum(b["nodata_frac"] for b in clean)

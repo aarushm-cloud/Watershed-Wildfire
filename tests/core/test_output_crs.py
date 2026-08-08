@@ -63,8 +63,10 @@ def _minimal_basins():
     mask[1:3, 1:3] = True   # a 2x2 block -> a non-empty polygon when vectorised
     return [{
         "basin_id": 0, "rank": 1, "score": 1.234567,
-        "mean_burn": 0.5, "mean_slope": 0.3, "area_km2": 0.04,
-        "burn_coverage_frac": 0.9, "flowed": True, "matched_creek": "",
+        "mean_burn": 0.5, "mean_slope": 0.3,
+        "slope_coverage_frac": 1.0, "low_slope_coverage": False,
+        "area_km2": 0.04, "burn_coverage_frac": 0.9, "low_coverage": False,
+        "flowed": True, "matched_creek": "",
         "mask": mask,
     }]
 

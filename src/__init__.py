@@ -4,4 +4,4 @@
 # namespace portion that a site-packages dependency happens to ship).
 # The repo root is placed on sys.path by validation/gate.py's own bootstrap
 # (keyed off __file__), so this works under pytest, the standalone lock
-# runner, and `python validation/gate.py` alike. See P1.1.
+# runner, and `python validation/gate.py` alike.

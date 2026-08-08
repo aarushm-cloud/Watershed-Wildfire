@@ -804,7 +804,7 @@ def render_rgb_preview(candidate, bbox):
 
 
 # ---------------------------------------------------------------------------
-# Standalone CLI (Build-Plan Phase 1 deliverable; the UI wraps select() in Phase 4)
+# Standalone CLI (the app's Generate mode wraps select())
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

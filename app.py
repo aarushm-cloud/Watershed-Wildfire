@@ -631,7 +631,10 @@ def main():
         # Per-fire mountain-front contour (m), operator input (B2); shared across both modes.
         contour_m = st.number_input("Mountain-front contour (m)", value=150.0, step=10.0,
                                     help="Range-front break elevation for THIS fire "
-                                         "(Montecito ~150; Cooks Peak ~1900; Deer Canyon ~1910).")
+                                         "(Montecito ~150; Cooks Peak ~1900; Deer Canyon ~1910). "
+                                         "Used by the validated canyon-mouth tier only -- ignored "
+                                         "when terrain routes to the incised sub-basin tier "
+                                         "(the default South Fork box is incised).")
         # The [Upload | Generate] toggle; Upload is the default (the proven path).
         mode_label = st.radio("Burn severity input",
                               ["Upload a dNBR", "Generate from dates"], horizontal=True)
@@ -810,7 +813,7 @@ def main():
         st.download_button("Download dual-rank map (PNG)", screen["map_png"],
                            file_name=DUAL_RANK_MAP_NAME, mime="image/png")
 
-    # AA-4: when this ranking came from an auto-acquired dNBR, show what was built --
+    # When this ranking came from an auto-acquired dNBR, show what was built --
     # the quicklook + the creator's audit record (scenes, dates, scaling, masks).
     if screen.get("quicklook"):
         with st.expander("The dNBR this screening used (auto-acquired)"):

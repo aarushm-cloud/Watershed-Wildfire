@@ -74,10 +74,11 @@ def ingest_burn(burn_path):
     if burn_source != "SBS":
         # A29: scoring SBS-derived weights under a dNBR stamp would be a silent mislabel.
         raise GateAbort(
-            f"ingest_burn: burn-source selection returned {burn_source!r}, but the dNBR end-to-end "
-            "arm is built and unit-tested yet NOT wired into ingest_burn (P2.2c pending). Refusing to "
-            f"stamp {burn_source!r} provenance while scoring SBS-derived weights. Wire the dNBR "
-            "dispatch (ingest_dnbr_both_arms) before running a fire without full SBS coverage."
+            f"ingest_burn: burn-source selection returned {burn_source!r}, but this seam scores "
+            "SBS-derived weights only -- dNBR fires are dispatched through ingest_dnbr_both_arms "
+            f"via their fire config (A34), never here. Refusing to stamp {burn_source!r} provenance "
+            "over SBS-derived weights: a partial-SBS raster is ambiguous (a genuine straddle vs a "
+            "broken/clipped input) and needs an explicit call."
         )
     wt, covered = _burn_weight_raster(sbs)
     provenance = {"burn_source": burn_source}   # A4: the single stamp, read everywhere
@@ -92,7 +93,7 @@ def reproject_dnbr(native_path, dem_profile, resampling):
         src_arr = src.read(1)
         src_transform = src.transform
         src_crs = src.crs
-        src_nodata = src.nodata           # P2.0 wrote nodata=-9999.0; pass it so resampling masks it
+        src_nodata = src.nodata           # native raw dNBR carries nodata=-9999.0; pass it so resampling masks it
     height, width = dem_profile["height"], dem_profile["width"]
     dst = np.full((height, width), DNBR_NODATA, dtype="float32")   # uncovered cells stay = DNBR_NODATA
     reproject(

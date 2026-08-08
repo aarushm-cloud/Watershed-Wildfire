@@ -61,7 +61,7 @@ SOUTHFORK_FIRE = {
     "dem": _SOUTHFORK_DATA / "dem" / "dem.tif",
     "sbs": None,                                    # dNBR-only fire; no SBS by design (A31, A29)
     # A39: incised terrain now ROUTES to the WBT sub-basin dNBR both-arms path instead of refusing, so
-    # South Fork needs its native dNBR burn input (the P3.2 acquisition, grid-matched to the DEM).
+    # South Fork needs its native dNBR burn input (grid-matched to the DEM).
     "dnbr": _SOUTHFORK_DATA / "burn" / "southfork_dnbr" / "dnbr_native.tif",
     "assets": _SOUTHFORK_DATA / "assets" / "osm_buildings_32613.gpkg",   # loaded only on the range-front path; incised skips it
     "creeks": None,                                 # no tool-format truth-creek layer for South Fork
@@ -431,7 +431,7 @@ def run_pipeline(fire=None, contour_m=None):
         # Partition on the scene-INDEPENDENT geometry, BEFORE the burn filter -- a clouded
         # burned basin must be REFUSED, not silently dropped by filter_burned_steep (A41).
         basins, refused_basins = _partition_refused(basins, D["nodata_mask"])
-        # A41 Task 3: refused basins are never scored, so mean_slope must be attached here for
+        # A41: refused basins are never scored, so mean_slope must be attached here for
         # the refused_basins.csv sidecar (nan-safe; all-NaN -> nan, rendered "" by outputs.py).
         for b in refused_basins:
             b["mean_slope"] = float(np.nanmean(slope[b["mask"]]))

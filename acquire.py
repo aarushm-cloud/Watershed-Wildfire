@@ -285,7 +285,7 @@ def stage_fire(bbox, out_dir, *, name: str = "fire", buf_deg: float | None = Non
             "fetched. Draw a box around ONE fire's burn area -- or, if this genuinely is a single "
             "megafire scar, raising acquire.MAX_BBOX_DEG2 is an owner decision (plumbing bound, not "
             "science) (A8/F7).")
-    grid = canonical_grid(west, south, east, north)            # CF-6: lon/lat -> UTM 10 m grid
+    grid = canonical_grid(west, south, east, north)            # lon/lat -> UTM 10 m grid
     # F7 front-door zone check -- the pipeline ingests only ALLOWED_UTM_ZONES: now the whole CONUS
     # coverage (UTM 10N-19N, A37). Without this, an out-of-coverage bbox pays the full DEM+buildings
     # fetch and THEN aborts deep in ingest with an assets-CRS message far from the cause. Refuse here.
@@ -298,8 +298,8 @@ def stage_fire(bbox, out_dir, *, name: str = "fire", buf_deg: float | None = Non
             "src/config.ALLOWED_UTM_ZONES (A8/F7).")
     buf_deg = 0.012 if buf_deg is None else buf_deg           # A41: mirrors fetch_buildings' own default
     stage = out_dir / "inputs"
-    dem_path = fetch_dem(bbox, grid, stage / "dem.tif")        # CF-7 (module-level -> monkeypatchable)
-    assets_path, n_buildings = fetch_buildings(bbox, grid.crs, stage / "buildings.gpkg", buf_deg=buf_deg)  # CF-8
+    dem_path = fetch_dem(bbox, grid, stage / "dem.tif")        # module-level -> monkeypatchable
+    assets_path, n_buildings = fetch_buildings(bbox, grid.crs, stage / "buildings.gpkg", buf_deg=buf_deg)
 
     fire = {
         "name": name,
@@ -317,10 +317,10 @@ def stage_fire(bbox, out_dir, *, name: str = "fire", buf_deg: float | None = Non
 
 
 def attach_dnbr(fire: dict, dnbr_path) -> dict:
-    """Validate + attach an uploaded dNBR to a fire staged by stage_fire (A41). CF-9 guard: the
-    raw-scale check runs before dnbr is used for anything. Completes the manifest stage_fire left
+    """Validate + attach an uploaded dNBR to a fire staged by stage_fire (A41). The raw-scale
+    check runs before dnbr is used for anything. Completes the manifest stage_fire left
     dnbr-less by rewriting the same manifest file with dnbr_upload filled in."""
-    dnbr_stats = assert_raw_dnbr(dnbr_path)                     # CF-9 guard before any dNBR use
+    dnbr_stats = assert_raw_dnbr(dnbr_path)                     # raw-scale guard before any dNBR use
     fire["dnbr"] = Path(dnbr_path)                               # the uploaded raster, carried unmodified
     manifest_path = Path(fire["out_dir"]) / "acquisition_manifest.json"
     try:
@@ -338,9 +338,9 @@ def attach_dnbr(fire: dict, dnbr_path) -> dict:
 
 def build_fire_config(bbox, dnbr_path, out_dir, name: str = "fire", *, buf_deg: float = 0.012) -> dict:
     """(bbox lon/lat + uploaded dNBR) -> staged files + the fire dict run_pipeline consumes
-    (sbs=None -> the dNBR both-arms path). CF-9 guard first, before any fetch (byte-equivalent to
-    pre-A41 behavior for this caller); attach_dnbr re-validates cheaply, harmlessly (A41 split)."""
-    assert_raw_dnbr(dnbr_path)                                  # CF-9 guard before any fetch (unchanged)
+    (sbs=None -> the dNBR both-arms path). Raw-scale guard first, before any fetch cost;
+    attach_dnbr re-validates cheaply, harmlessly (A41 split)."""
+    assert_raw_dnbr(dnbr_path)                                  # raw-scale guard before any fetch
     fire = stage_fire(bbox, out_dir, name=name, buf_deg=buf_deg)
     return attach_dnbr(fire, dnbr_path)
 

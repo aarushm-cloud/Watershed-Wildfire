@@ -65,7 +65,10 @@ def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source,
         rows.append({
             "basin_id": b["basin_id"], "rank": b["rank"], "score": round(b["score"], 6),
             "mean_burn": round(b["mean_burn"], 4), "mean_slope": round(b["mean_slope"], 4),
+            "slope_coverage_frac": round(b["slope_coverage_frac"], 4),   # F4: clean (non-nodata-ring) fraction
+            "low_slope_coverage": b["low_slope_coverage"],               # F4: flagged if scored on a small remnant
             "area_km2": round(b["area_km2"], 4), "burn_coverage_frac": round(b["burn_coverage_frac"], 4),
+            "low_coverage": b["low_coverage"],
             # drains_to_asset tautologically True: delineate only emits basins past the 600 m drains-to-asset filter (A19/C9)
             "drains_to_asset": True, "flowed": b["flowed"],
             "matched_creek": b["matched_creek"],
@@ -92,8 +95,11 @@ def write_outputs(basins, creek_nearest, out_dir, dem_tif, burn_source,
         geoms.append(unary_union(polys))
         props.append({"basin_id": b["basin_id"], "rank": b["rank"], "score": round(b["score"], 6),
                       "mean_burn": round(b["mean_burn"], 4), "mean_slope": round(b["mean_slope"], 4),
+                      "slope_coverage_frac": round(b["slope_coverage_frac"], 4),   # F4
+                      "low_slope_coverage": b["low_slope_coverage"],               # F4
                       "area_km2": round(b["area_km2"], 4),
                       "burn_coverage_frac": round(b["burn_coverage_frac"], 4),
+                      "low_coverage": b["low_coverage"],
                       "flowed": b["flowed"], "matched_creek": b["matched_creek"],
                       "burn_source": burn_source, "screening": SCREENING_STATEMENT})
     gdf = gpd.GeoDataFrame(props, geometry=geoms, crs=dem_crs).to_crs("EPSG:4326")
@@ -211,7 +217,7 @@ def write_dnbr_outputs(arm_a, arm_b, creek_nearest, out_dir, dem_tif,
             "flowed": a.get("flowed", False), "matched_creek": a.get("matched_creek", ""),
             "nearest_outlet_dist_m": round(near[1], 1) if near[1] is not None else "",
         }
-        nd = a.get("nodata_frac")   # A41: present since Task 2; "" fallback for hand-built test basins
+        nd = a.get("nodata_frac")   # A41: every pipeline basin carries it; "" fallback for hand-built test basins
         row["nodata_frac"] = round(nd, 4) if nd is not None else ""
         if incised:   # A39: appended LAST -- pandas headers follow dict insertion order
             row["intensity"] = round(a.get("intensity"), 6)   # score-family precision (score/score_b)
