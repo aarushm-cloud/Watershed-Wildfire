@@ -366,7 +366,7 @@ def _top_k_markers(fc: dict, k: int) -> list:
 
 
 def build_basin_map(fc: dict, *, uncertain_delta: int = RANK_UNCERTAIN_DELTA,
-                    top_k: int = 10, focus_basin_id=None, refused_fc: dict = None) -> folium.Map:
+                    top_k: int = 10, focus_basin_id=None, refused_fc: dict | None = None) -> folium.Map:
     """Folium map of the ranked basins: fill by Arm A rank, dashed outline = rank-uncertain,
     numbered markers on the top_k, focus_basin_id zooms to one basin. refused_fc (A41): an
     optional refused_basins.geojson FeatureCollection, hatched in AFTER the ranked layer --
@@ -553,11 +553,24 @@ def _render_generate_panel(gen_box, bbox_raw, inputs_key, screen_box, *, ignitio
                 with st.spinner("Re-gating the swapped pair..."):
                     ev = scene_select.evaluate_pair(
                         byid[pre_pick], byid[post_pick], validate_bbox(*bbox_raw))
-                package["pair"] = {"sensor": package["pair"]["sensor"],
-                                   "pre": byid[pre_pick], "post": byid[post_pick],
-                                   "metrics": ev["metrics"], "verdict": ev["verdict"]}
-                gen_box.pop("burnmap", None)            # stale quicklook of the old pair
-                st.rerun()
+                if not ev["passes_gate"]:
+                    # R1 (spec 7): the INDEPENDENT double-swap can build a pair below the box-gate
+                    # floor -- a pre+post combination the selector never vetted together (each alt
+                    # was gated only against the recommended partner). passes_gate is the same
+                    # BOX_GATE_FLOOR select() accepts on; honor it here, never offer a sub-floor
+                    # pair for Approve & build. The recommended pair stays in place.
+                    st.error(
+                        f"That pre+post combination covers only "
+                        f"{ev['metrics']['pair_valid_frac'] * 100:.0f}% of your fire area -- below "
+                        f"the {scene_select.BOX_GATE_FLOOR * 100:.0f}% clean-gate floor. Keeping "
+                        "the recommended pair; pick another combination or wait for a clearer scene."
+                    )
+                else:
+                    package["pair"] = {"sensor": package["pair"]["sensor"],
+                                       "pre": byid[pre_pick], "post": byid[post_pick],
+                                       "metrics": ev["metrics"], "verdict": ev["verdict"]}
+                    gen_box.pop("burnmap", None)            # stale quicklook of the old pair
+                    st.rerun()
             except (GateAbort, ValueError) as e:
                 st.error(str(e))
 

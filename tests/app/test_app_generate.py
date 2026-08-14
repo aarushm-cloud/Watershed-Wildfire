@@ -455,6 +455,78 @@ def test_burnmap_preview_popped_after_a_completed_sweep(monkeypatch):
     assert "burnmap" not in at.session_state["gen"]
 
 
+# ---- Independent pre/post swap (spec 7): the re-gate is enforced, not just computed (R1) ----
+
+
+def _swap_apptest(monkeypatch, evaluate_pair_result):
+    """A Generate-mode AppTest seeded with a recommended pair carrying BOTH a pre and a post
+    alternative, so the independent double-swap (spec 7) is reachable. evaluate_pair is stubbed
+    (the real one reads rasters) to return the given re-gate result; render_rgb_preview is
+    short-circuited (no network)."""
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setattr(ss, "render_rgb_preview",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no network in tests")))
+    monkeypatch.setattr(ss, "evaluate_pair", lambda *a, **k: evaluate_pair_result)
+    pkg = _package()
+    # Full-field alternatives so a swapped pair can render through scorecard_view.
+    pkg["alternatives"] = {
+        "pre": [{"id": "PRE2", "sensor": "S2", "date": date(2026, 6, 3), "tile_cloud_pct": 20.0}],
+        "post": [{"id": "POST2", "sensor": "S2", "date": date(2026, 7, 9), "tile_cloud_pct": 60.0}],
+    }
+    at = AppTest.from_file(str(_REPO_ROOT / "app.py"), default_timeout=90)
+    at.session_state["gen"] = {"outcome": {"kind": "package", "package": pkg}}
+    at.run()
+    radio = next(r for r in at.radio if "Burn severity" in (r.label or ""))
+    radio.set_value("Generate from dates")
+    at.run()
+    assert not at.exception, at.exception
+    return at
+
+
+def test_below_floor_swapped_pair_is_not_offered_for_build(monkeypatch):
+    """R1 (2026-07-18 review): the independent pre/post double-swap can construct a pair below
+    the box-gate floor -- a combination never gated together. evaluate_pair returns
+    passes_gate=False for it; the panel MUST honor that and refuse the pair (spec 7 below-bar ->
+    Mode B), never silently leave a sub-floor pair approvable."""
+    below = {
+        "metrics": {"pre_valid_frac": 0.70, "post_valid_frac": 0.60, "pair_valid_frac": 0.40},
+        "verdict": {"verdict": "below_bar", "summary": "below the bar"},
+        "passes_gate": False,
+    }
+    at = _swap_apptest(monkeypatch, below)
+    pre_sel = next(s for s in at.selectbox if "Pre-fire scene" in (s.label or ""))
+    post_sel = next(s for s in at.selectbox if "Post-fire scene" in (s.label or ""))
+    pre_sel.set_value("PRE2")
+    post_sel.set_value("POST2")
+    next(b for b in at.button if b.label == "Use this pair").set_value(True)
+    at.run()
+    assert not at.exception, at.exception
+    # The sub-floor pair was NOT adopted -- the recommended pair still stands.
+    adopted = at.session_state["gen"]["outcome"]["package"]["pair"]
+    assert adopted["pre"]["id"] == "PRE" and adopted["post"]["id"] == "POST"
+    # ...and the operator is told why, in the clean-gate's own terms.
+    assert any("floor" in str(e.value).lower() for e in at.error)
+
+
+def test_passing_swapped_pair_is_adopted(monkeypatch):
+    """The other side of R1: a swap whose re-gate PASSES must still go through -- the fix gates
+    on passes_gate, it does not freeze the swap path."""
+    ok = {
+        "metrics": {"pre_valid_frac": 0.95, "post_valid_frac": 0.92, "pair_valid_frac": 0.88},
+        "verdict": {"verdict": "good", "summary": "covers ~88% of your fire area."},
+        "passes_gate": True,
+    }
+    at = _swap_apptest(monkeypatch, ok)
+    next(s for s in at.selectbox if "Pre-fire scene" in (s.label or "")).set_value("PRE2")
+    next(s for s in at.selectbox if "Post-fire scene" in (s.label or "")).set_value("POST2")
+    next(b for b in at.button if b.label == "Use this pair").set_value(True)
+    at.run()
+    assert not at.exception, at.exception
+    adopted = at.session_state["gen"]["outcome"]["package"]["pair"]
+    assert adopted["pre"]["id"] == "PRE2" and adopted["post"]["id"] == "POST2"
+
+
 def test_degraded_sweep_result_renders_and_persists_through_a_rerun(monkeypatch):
     fake = _fake_run_sweep("degraded", refused_ids=["p1", "p2"])
     at = _seeded_generate_apptest(monkeypatch, fake)

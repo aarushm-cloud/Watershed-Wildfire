@@ -16,7 +16,6 @@ def _writer_call_sites():
     import app, run
     from autoacquire import autoacquire_run, sweep
     return {"app.run_screening": inspect.getsource(app.run_screening),
-            "app.run_generated_screening": inspect.getsource(app.run_generated_screening),
             "autoacquire_run": inspect.getsource(autoacquire_run),
             "run.py": inspect.getsource(run),
             # A41 (Task 7 review F2): the Generate path's REAL writer call moved here
@@ -26,13 +25,16 @@ def _writer_call_sites():
             "autoacquire.sweep.run_sweep": inspect.getsource(sweep.run_sweep)}
 
 
-@pytest.mark.parametrize("name", ["app.run_screening", "app.run_generated_screening",
-                                  "autoacquire_run", "run.py", "autoacquire.sweep.run_sweep"])
+@pytest.mark.parametrize("name", ["app.run_screening", "autoacquire_run", "run.py",
+                                  "autoacquire.sweep.run_sweep"])
 def test_every_writer_call_site_passes_incised(name):
-    """A static check: each site that calls write_dnbr_outputs must pass incised=."""
+    """Each real writer call site must pass incised=. The Generate path's write lives in
+    sweep.run_sweep's nested _run_attempt, so app.run_generated_screening -- now a thin
+    sweep-backed wrapper -- is intentionally not listed (its writer is covered via run_sweep)."""
     src = _writer_call_sites()[name]
-    if "write_dnbr_outputs" not in src:
-        pytest.skip(f"{name} does not call write_dnbr_outputs")
+    assert "write_dnbr_outputs" in src, (
+        f"{name} is listed as a writer call site but no longer calls write_dnbr_outputs -- "
+        "update the registry or fix the wiring (no silent skip)")
     assert "incised=" in src, (
         f"{name} calls write_dnbr_outputs without incised= -- an incised fire would ship "
         f"an UNDISCLAIMED ranking")
