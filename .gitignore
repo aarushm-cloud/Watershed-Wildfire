@@ -23,4 +23,11 @@ __pycache__/
 # Extra
 CLAUDE.md
 DECISIONS.md
-/.claude/commands
+
+# AI / internal working files -- never in the public repo
+/.claude/
+/.superpowers/
+/docs/superpowers/
+.specstory/
+.cursor/
+.aider*
